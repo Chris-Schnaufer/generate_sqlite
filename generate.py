@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """Generates a SQLite database for discovering files
 """
-import _asyncio
 import argparse
-import asyncio
 from datetime import datetime, timedelta
 import json
 import logging
@@ -18,13 +16,15 @@ from osgeo import ogr
 import globus_sdk
 from dateutil.parser import parse
 
-RUN_SYNCHRONOUSLY = True
-
 GLOBUS_START_PATH = '/ua-mac'
-GLOBUS_ENDPOINT = 'Terraref'
-GLOBUS_CLIENT_ID = '80e3a80b-0e81-43b0-84df-125ce5ad6088'
-GLOBUS_LOCAL_ENDPOINT_ID = '3095856a-fd85-11e8-9345-0e3d676669f4'
-GLOBUS_LOCAL_START_PATH = 'globus_data'
+GLOBUS_ENVIRONMENT_LOGGER_PATH = 'raw_data/EnvironmentLogger'
+GLOBUS_ENDPOINT = 'Terraref'  # This is dependent upon the user; add a command line argument?
+GLOBUS_CLIENT_ID = '80e3a80b-0e81-43b0-84df-125ce5ad6088'  # This script's ID registered with Globus
+GLOBUS_LOCAL_ENDPOINT_ID = '3095856a-fd85-11e8-9345-0e3d676669f4'  # Find another way to get this info
+GLOBUS_LOCAL_START_PATH = 'globus_data'  # another user specific value
+
+LOCAL_ROOT_PATH = '/Users/chris/'   # Works for me but not anyone else; needs to change
+LOCAL_STRIP_PATH = os.path.join(LOCAL_ROOT_PATH, GLOBUS_LOCAL_START_PATH) + '/'  # Needs another approach; user specific
 
 BETYDB_ENV_URL = 'BETYDB_URL'
 BETYDB_ENV_KEY = 'BETYDB_KEY'
@@ -628,7 +628,7 @@ def globus_get_files_details(client: globus_sdk.TransferClient, endpoint_id: str
         return None
 
     # Fetch metadata and pull information out of it
-    globus_save_path = os.path.join('/Users/chris/', GLOBUS_LOCAL_START_PATH, os.path.basename(json_file))
+    globus_save_path = os.path.join(LOCAL_ROOT_PATH, GLOBUS_LOCAL_START_PATH, os.path.basename(json_file))
     if not os.path.exists(globus_save_path):
         globus_remote_path = os.path.join(files_path, json_file)
         transfer_setup = globus_sdk.TransferData(client, endpoint_id, GLOBUS_LOCAL_ENDPOINT_ID,
@@ -700,8 +700,12 @@ def local_get_files_details(files_path: str) -> Optional[list]:
         if file_format:
             file_format = file_format.lstrip('.')
 
+        if not files_path.startswith(LOCAL_STRIP_PATH):
+            raise RuntimeError("Expected file path to start with %s not %s" % (LOCAL_STRIP_PATH, files_path))
+
+        globus_path = os.path.join(GLOBUS_START_PATH, "raw_data", files_path[len(LOCAL_STRIP_PATH):])
         file_info = {
-            'directory': files_path,
+            'directory': globus_path,
             'filename': one_entry,
             'format': file_format
         }
@@ -719,115 +723,6 @@ def local_get_files_details(files_path: str) -> Optional[list]:
     variable_metadata = {}
     fixed_metadata = {}
     with open(os.path.join(files_path, json_file), 'r') as in_file:
-        metadata = json.load(in_file)
-        if 'lemnatec_measurement_metadata' in metadata:
-            lmm = metadata['lemnatec_measurement_metadata']
-            for one_key in ['gantry_system_variable_metadata', 'sensor_variable_metadata']:
-                if one_key in lmm:
-                    variable_metadata[one_key] = lmm[one_key]
-            for one_key in ['gantry_system_fixed_metadata', 'sensor_fixed_metadata']:
-                if one_key in lmm:
-                    fixed_metadata[one_key] = lmm[one_key]
-
-    pos_x, pos_y, pos_z, start_time = None, None, None, None
-    if 'gantry_system_variable_metadata' in variable_metadata:
-        gsvm = variable_metadata['gantry_system_variable_metadata']
-        if 'position x [m]' in gsvm:
-            pos_x = gsvm['position x [m]']
-        if 'position y [m]' in gsvm:
-            pos_y = gsvm['position y [m]']
-        if 'position z [m]' in gsvm:
-            pos_z = gsvm['position z [m]']
-        if 'time' in gsvm:
-            start_time = gsvm['time']
-
-    # Update the file information
-    more_details = {}
-    if variable_metadata:
-        more_details['variable_metadata'] = variable_metadata
-    if fixed_metadata:
-        more_details['fixed_metadata'] = fixed_metadata
-    if pos_x:
-        more_details['gantry_x'] = pos_x
-    if pos_y:
-        more_details['gantry_y'] = pos_y
-    if pos_z:
-        more_details['gantry_z'] = pos_z
-    if start_time:
-        more_details['start_time'] = start_time
-        more_details['finish_time'] = start_time
-
-    for idx, values in enumerate(file_details):
-        file_details[idx] = {**more_details, **values}
-
-    return file_details
-
-
-async def _globus_file_transfer(client, endpoint_id, remote_path: str, local_save_path: str) -> str:
-    """Used to asynchronously fetch a file from Globus
-    Arguments:
-        client: the Globus transfer client to use
-        endpoint_id: the ID of the endpoint to access
-        remote_path: path to file in Globus endpoint
-        local_save_path: path to save file to
-    Return:
-        Returns the local path once the file is transferred
-    Exceptions:
-        Raises RuntimeError if the transfer task failed
-    """
-    transfer_setup = globus_sdk.TransferData(client, endpoint_id, GLOBUS_LOCAL_ENDPOINT_ID,
-                                             label="Get metadata", sync_level="checksum")
-    transfer_setup.add_item(remote_path, local_save_path)
-    transfer_request = client.submit_transfer(transfer_setup)
-    task_result = client.task_wait(transfer_request['task_id'], timeout=600, polling_interval=5)
-
-    if not task_result:
-        raise RuntimeError("Unable to retrieve JSON metadata: %s" % os.path.basename(local_save_path))
-
-    return local_save_path
-
-
-def globus_get_files_details_async(client: globus_sdk.TransferClient, endpoint_id: str, files_path: str) -> Optional[_asyncio.Task]:
-    """Loads the files found on the path as a task
-    Arguments:
-        client: the Globus transfer client to use
-        endpoint_id: the ID of the endpoint to access
-        files_path: the path to load file information from
-    """
-    file_details = []
-    json_file = None
-
-    for one_entry in client.operation_ls(endpoint_id, path=files_path):
-        file_format = os.path.splitext(one_entry['name'])[1]
-        if file_format:
-            file_format = file_format.lstrip('.')
-
-        file_info = {
-            'directory': files_path,
-            'filename': one_entry['name'],
-            'format': file_format
-        }
-        file_details.append(file_info)
-
-        if one_entry['name'].endswith('metadata.json'):
-            json_file = one_entry['name']
-
-    if not json_file:
-        if file_details:
-            raise RuntimeWarning("No metadata JSON file found in folder %s" % files_path)
-        return None
-
-    # Fetch metadata and pull information out of it
-    globus_save_path = os.path.join('/Users/chris/', GLOBUS_LOCAL_START_PATH, os.path.basename(json_file))
-    if not os.path.exists(globus_save_path):
-        globus_remote_path = os.path.join(files_path, json_file)
-        file_fetch_func = lambda: _globus_file_transfer(client, endpoint_id, globus_remote_path, globus_save_path)
-    else:
-        file_fetch_func = lambda: globus_save_path
-
-    variable_metadata = {}
-    fixed_metadata = {}
-    with open(os.path.join(globus_save_path), 'r') as in_file:
         metadata = json.load(in_file)
         if 'lemnatec_measurement_metadata' in metadata:
             lmm = metadata['lemnatec_measurement_metadata']
@@ -893,19 +788,15 @@ def globus_get_files(client: globus_sdk.TransferClient, endpoint_id: str, sensor
             if one_entry['type'] == 'dir':
                 sub_path = os.path.join(cur_path, one_entry['name'])
                 logging.debug("Globus remote file path: %s", sub_path)
-                if RUN_SYNCHRONOUSLY:
-                    cur_files = globus_get_files_details(client, endpoint_id, sub_path)
-                    if cur_files:
-                        logging.debug("Found %s files for sub path: %s", str(len(cur_files)), sub_path)
-                        if one_date not in found_files:
-                            found_files[one_date] = cur_files
-                        else:
-                            found_files[one_date].extend(cur_files)
+                cur_files = globus_get_files_details(client, endpoint_id, sub_path)
+                if cur_files:
+                    logging.debug("Found %s files for sub path: %s", str(len(cur_files)), sub_path)
+                    if one_date not in found_files:
+                        found_files[one_date] = cur_files
                     else:
-                        logging.debug("Found 0 files for sub path: %s", sub_path)
+                        found_files[one_date].extend(cur_files)
                 else:
-                    raise RuntimeError("Asynchronous fetching from Globus is not supported at this time")
-                    # pending_tasks.append(asyncio.create_task(globus_get_files_details_async(client, endpoint_id, sub_path)))
+                    logging.debug("Found 0 files for sub path: %s", sub_path)
 
     return found_files
 
@@ -920,6 +811,7 @@ def local_get_files(sensor_path: str, date_experiment_ids: dict) -> dict:
     """
     found_files = {}
     base_path = sensor_path
+    found_local_folders = 0
     for one_date in date_experiment_ids.keys():
         cur_path = os.path.join(base_path, one_date)
         logging.debug("Local path: %s", cur_path)
@@ -927,7 +819,7 @@ def local_get_files(sensor_path: str, date_experiment_ids: dict) -> dict:
         for one_entry in path_contents:
             sub_path = os.path.join(cur_path, one_entry)
             if os.path.isdir(sub_path):
-                logging.debug("Local folder path: %s", sub_path)
+                found_local_folders += 1
                 cur_files = local_get_files_details(sub_path)
                 if cur_files:
                     if one_date not in found_files:
@@ -937,20 +829,22 @@ def local_get_files(sensor_path: str, date_experiment_ids: dict) -> dict:
                 else:
                     logging.debug("Found 0 files for sub path: %s", sub_path)
 
+    logging.debug("Found %s local folders", str(found_local_folders))
     return found_files
 
 
-def globus_get_save_files(remote_endpoint: str, sensor_paths: tuple, date_experiment_ids: dict, db_conn: sqlite3.Connection) -> None:
+def globus_get_save_files(globus_authorizer: globus_sdk.RefreshTokenAuthorizer, remote_endpoint: str, sensor_paths: tuple,
+                          date_experiment_ids: dict, db_conn: sqlite3.Connection) -> None:
     """Fetches file information associated with the sensors and dates from Globus and updates the database
     Arguments:
+        globus_authorizer: the Globus authorization instance
         remote_endpoint: the remote endpoint to access
         sensor_paths: a tuple of sensors and their associated paths
         date_experiment_ids: dates with their associated experiment ID
         db_conn: the database to write to
     """
     # Prepare to fetch file information from Globus
-    authorizer = globus_get_authorizer()
-    trans_client = globus_sdk.TransferClient(authorizer=authorizer)
+    trans_client = globus_sdk.TransferClient(authorizer=globus_authorizer)
 
     # Find the remote ID
     endpoint_id = None
@@ -1051,6 +945,138 @@ def local_get_save_files(sensor_paths: tuple, date_experiment_ids: dict, db_conn
     logging.debug("Wrote %s file records", str(total_records))
 
 
+def globus_get_all_weather(client: globus_sdk.TransferClient, endpoint_id: str, dates: list) -> dict:
+    """Returns a dictionary of all the weather found for the dates provided
+    Arguments:
+        client: the Globus transfer client to use
+        endpoint_id: the ID of the endpoint to access
+        dates: the list of dates to get
+    Return:
+        Returns a dictionary with dates as keys, each associated with a list of informational dict's on the weather for that date
+    """
+    found_weather = {}
+    base_path = os.path.join('/-', GLOBUS_START_PATH, GLOBUS_ENVIRONMENT_LOGGER_PATH)
+    transfer_setup = globus_sdk.TransferData(client, endpoint_id, GLOBUS_LOCAL_ENDPOINT_ID,
+                                             label="Get weather", sync_level="checksum")
+
+    # Setup for getting files that aren't local
+    dates_files = {}
+    file_transfer_needed = False
+    for one_date in dates:
+        cur_path = os.path.join(base_path, one_date)
+        logging.debug("Globus path: %s", cur_path)
+        path_contents = client.operation_ls(endpoint_id, path=cur_path)
+        dates_files[one_date] = []
+        for one_entry in path_contents:
+            if one_entry['type'] == 'file':
+                json_path = os.path.join(cur_path, one_entry['name'])
+                logging.debug("Globus remote file path: %s", json_path)
+                globus_save_path = os.path.join(LOCAL_ROOT_PATH, GLOBUS_LOCAL_START_PATH, os.path.basename(json_path))
+                dates_files[one_date].append(globus_save_path)
+                if not os.path.exists(globus_save_path):
+                    globus_remote_path = json_path
+                    transfer_setup.add_item(globus_remote_path, globus_save_path)
+                    file_transfer_needed = True
+
+    # Fetch files if necessary
+    if file_transfer_needed:
+        transfer_request = client.submit_transfer(transfer_setup)
+        task_result = client.task_wait(transfer_request['task_id'], timeout=600, polling_interval=5)
+        if not task_result:
+            raise RuntimeError("Unable to retrieve weather files from Globus")
+
+    # Loop through and load all the data
+    problems_found = False
+    for one_date, date_file_list in enumerate(dates_files):
+        if date_file_list:
+            found_weather[one_date] = []
+            logging.debug("Loading %s weather files for date %s", len(date_file_list), one_date)
+            for one_file in date_file_list:
+                with open(one_file, 'r') as in_file:
+                    weather = json.load(in_file)
+                    if 'environment_sensor_readings' in weather:
+                        for one_reading in weather['environment_sensor_readings']:
+                            weather_info = {'timestamp': one_reading['timestamp']}
+                            for one_sensor, sensor_readings in enumerate(weather['environment_sensor_readings']['weather_station']):
+                                weather_info[one_sensor] = sensor_readings['value']
+                            found_weather[one_date].append(weather_info)
+                    else:
+                        logging.error("Unknown JSON file format for weather file '%s'", one_file)
+                        problems_found = True
+        else:
+            logging.debug("Found no files to load for date %s", one_date)
+
+    if problems_found:
+        raise RuntimeError("Unable to complete loading weather data due to previous problems")
+
+    return found_weather
+
+
+def get_save_weather(globus_authorizer: globus_sdk.RefreshTokenAuthorizer, remote_endpoint: str, date_experiment_ids: dict,
+                     db_conn: sqlite3.Connection) -> None:
+    """Retrieves  and  saves weather  data
+    Arguments:
+        globus_authorizer: the Globus authorization instance
+        remote_endpoint: the remote endpoint to access
+        date_experiment_ids: dates with their associated experiment ID
+        db_conn: the database to write to
+    """
+    # Prepare to fetch weather information from Globus
+    trans_client = globus_sdk.TransferClient(authorizer=globus_authorizer)
+
+    # Find the remote ID
+    endpoint_id = None
+    for endpoint in trans_client.endpoint_search(filter_scope='shared-with-me'):
+        if 'display_name' in endpoint and endpoint['display_name'] == remote_endpoint:
+            endpoint_id = endpoint['id']
+            break
+        if 'canonical_name' in endpoint and endpoint['canonical_name'] == remote_endpoint:
+            endpoint_id = endpoint['id']
+            break
+    if not endpoint_id:
+        raise RuntimeError("Unable to find remote endpoint: %s" % remote_endpoint)
+
+    # Create the table for file information
+    weather_cursor = db_conn.cursor()
+    weather_cursor.execute('''CREATE TABLE weather
+                           (timestamp TEXT, temperature FLOAT, illuminance FLOAT, precipitation FLOAT, sun_direction FLOAT,
+                           wind_speed FLOAT, wind_direction FLOAT, relative_humidity FLOAT)''')
+
+    # Loop through each sensor and dates and get the associated file information
+    num_inserted = 0
+    total_records = 0
+    problems_found = 0
+    # Load all the data to be found and check for missing dates (aka: missing data) below
+    all_weather = globus_get_all_weather(trans_client, endpoint_id, list(date_experiment_ids.keys()))
+    for one_date in date_experiment_ids:
+        if one_date not in all_weather:
+            logging.warning("Unable to find weather data for date %s", one_date)
+            problems_found = True
+            continue
+
+        for one_weather in all_weather[one_date]:
+            weather_cursor.execute('INSERT INTO weather VALUES(?, ?, ?, ?, ?, ?, ?, ?)',
+                                   [one_weather['timestamp'], one_weather['temperature'], one_weather['brightness'],
+                                    one_weather['precipitation'], one_weather['sunDirection'], one_weather['windVelocity'],
+                                    one_weather['windDirection'], one_weather['relHumidity']])
+            num_inserted += 1
+            total_records += 1
+            if num_inserted >= MAX_INSERT_BEFORE_COMMIT:
+                db_conn.commit()
+                num_inserted = 0
+
+    db_conn.commit()
+    weather_cursor.close()
+
+    if problems_found:
+        raise RuntimeError("Unable to retrieve weather data for all dates")
+
+    if total_records <= 0:
+        logging.warning("No weather records were written")
+
+    logging.debug("Wrote %s weather records", str(total_records))
+
+
 def create_db_views(db_conn: sqlite3.Connection) -> None:
     """Adds views to the database
     Arguments:
@@ -1103,6 +1129,9 @@ def generate() -> None:
     sql_db = sqlite3.connect(working_filename)
 
     try:
+        # Get the Globus authorization
+        authorizer = globus_get_authorizer()
+
         # Generate the experiments table
         experiments, cultivars, date_experiment_ids = get_save_experiments(dates, sql_db, betydb_url, betydb_key, brapi_url,
                                                                            args.experiment_json, args.cultivar_json)
@@ -1111,8 +1140,11 @@ def generate() -> None:
         save_cultivars(cultivars, sql_db)
 
         # Create the files table
-        # globus_get_save_files(args.globus_endpoint, sensor_paths, date_experiment_ids, sql_db)
+        # globus_get_save_files(authorizer, args.globus_endpoint, sensor_paths, date_experiment_ids, sql_db)
         local_get_save_files(sensor_paths, date_experiment_ids, sql_db)
+
+        # Create the weather table
+        get_save_weather(authorizer, args.globus_endpoint, date_experiment_ids, sql_db)
 
         # Create the views
         create_db_views(sql_db)
