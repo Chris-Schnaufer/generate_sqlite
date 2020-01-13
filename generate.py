@@ -202,15 +202,13 @@ def get_betydb_url(betydb_url_arg: str) -> str:
         betydb_url_arg: the command line argument for the BETYdb URL
     Return:
         Returns the found BETYdb URL
-    Exceptions:
-        RuntimeError is raised if a problem occurs or a BETYdb URL can't be found
     """
     if betydb_url_arg and betydb_url_arg.strip():
         return betydb_url_arg
 
     env_url = os.environ.get(BETYDB_ENV_URL)
     if not env_url:
-        raise RuntimeError("BETYDB_URL environment variable has not been set")
+        logging.warning("BETYDB_URL environment variable has not been set")
 
     return env_url
 
@@ -221,15 +219,13 @@ def get_betydb_key(betydb_key_arg: str) -> str:
         betydb_key_arg: the command line argument for the BETYdb key
     Return:
         Returns the found BETYdb key
-    Exceptions:
-        RuntimeError is raised if a problem occurs or a BETYdb key can't be found
     """
     if betydb_key_arg and betydb_key_arg.strip():
         return betydb_key_arg
 
     env_key = os.environ.get(BETYDB_ENV_KEY)
     if not env_key:
-        raise RuntimeError("BETYDB_KEY environment variable has not been set")
+        logging.warning("BETYDB_KEY environment variable has not been set")
 
     return env_key
 
@@ -245,6 +241,23 @@ def get_brapi_url(brapi_url_arg: str) -> str:
         return brapi_url_arg
 
     return BRAPI_URL
+
+
+def make_timestamp_instance(timestamp_string: str) -> datetime:
+    """Converts a string timestamp to a timestamp object
+    Arguments:
+        timestamp_string: the timestamp to convert (see Notes)
+    Return:
+        Returns a timestamp object representing the timestamp passed in
+    Notes:
+        Only accepts timestamp strings with the following format:
+            "MM/DD/YYYY HH:MI:SS"
+            "YYYY.MM.DD-HH:MI:SS"
+    """
+    if '.' in timestamp_string:
+        return datetime.strptime(timestamp_string, '%Y.%m.%d-%H:%M:%S')
+
+    return datetime.strptime(timestamp_string, '%m/%d/%Y %H:%M:%S')
 
 
 def get_experiments_by_dates(dates: tuple, betydb_url: str, betydb_key: str, experiment_json_file: str = None) -> tuple:
@@ -898,22 +911,27 @@ def globus_get_save_files(globus_authorizer: globus_sdk.RefreshTokenAuthorizer, 
     logging.debug("Wrote %s file records", str(total_records))
 
 
-def local_get_save_files(sensor_paths: tuple, date_experiment_ids: dict, db_conn: sqlite3.Connection) -> None:
+def local_get_save_files(sensor_paths: tuple, date_experiment_ids: dict, db_conn: sqlite3.Connection) -> dict:
     """Locally fetches file information associated with the sensors and dates and updates the database
     Arguments:
         sensor_paths: a tuple of sensors and their associated paths
         date_experiment_ids: dates with their associated experiment ID
         db_conn: the database to write to
+    Return:
+        Returns a dictionary of file IDs, and their associated start and finish timestamps as a tuple
     """
+    files_timestamp = {}
+
     # Create the table for file information
     file_cursor = db_conn.cursor()
     file_cursor.execute('''CREATE TABLE files
-                          (path TEXT, filename TEXT, format TEXT, sensor TEXT, start_time TEXT, finish_time TEXT,
+                          (id INTEGER, path TEXT, filename TEXT, format TEXT, sensor TEXT, start_time TEXT, finish_time TEXT,
                            gantry_x FLOAT, gantry_y FLOAT, gantry_z FLOAT, season_id INTEGER)''')
 
     # Loop through each sensor and dates and get the associated file information
     num_inserted = 0
     total_records = 0
+    file_id = 1
     for one_sensor_path in sensor_paths:
         sensor = one_sensor_path[0]
         paths = one_sensor_path[1]
@@ -925,13 +943,17 @@ def local_get_save_files(sensor_paths: tuple, date_experiment_ids: dict, db_conn
 
             for one_date in files.keys():
                 date_files = files[one_date]
-                logging.debug("Date files count: %s %s", len(date_files), type(date_files))
                 experiment_id = date_experiment_ids[one_date]
                 for one_file in date_files:
-                    file_cursor.execute('INSERT INTO files VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                                        [one_file['directory'], one_file['filename'], one_file['format'], sensor,
+                    file_cursor.execute('INSERT INTO files VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                                        [file_id, one_file['directory'], one_file['filename'], one_file['format'], sensor,
                                          one_file['start_time'], one_file['finish_time'], one_file['gantry_x'],
                                          one_file['gantry_y'], one_file['gantry_z'], experiment_id])
+
+                    files_timestamp[file_id] = (make_timestamp_instance(one_file['start_time']),
+                                                make_timestamp_instance(one_file['finish_time']))
+
+                    file_id += 1
                     num_inserted += 1
                     total_records += 1
                     if num_inserted >= MAX_INSERT_BEFORE_COMMIT:
@@ -944,6 +966,8 @@ def local_get_save_files(sensor_paths: tuple, date_experiment_ids: dict, db_conn
         logging.warning("No file records were written")
     logging.debug("Wrote %s file records", str(total_records))
 
+    return files_timestamp
+
 
 def globus_get_all_weather(client: globus_sdk.TransferClient, endpoint_id: str, dates: list) -> dict:
     """Returns a dictionary of all the weather found for the dates provided
@@ -952,7 +976,7 @@ def globus_get_all_weather(client: globus_sdk.TransferClient, endpoint_id: str, 
         endpoint_id: the ID of the endpoint to access
         dates: the list of dates to get
     Return:
-        Returns a dictionary with dates as keys, each associated with a list of informational dict's on the weather for that date
+        Returns a dictionary with dates as keys, each associated with a list of informational dict's on the weather for those dates
     """
     found_weather = {}
     base_path = os.path.join('/-', GLOBUS_START_PATH, GLOBUS_ENVIRONMENT_LOGGER_PATH)
@@ -987,7 +1011,7 @@ def globus_get_all_weather(client: globus_sdk.TransferClient, endpoint_id: str, 
 
     # Loop through and load all the data
     problems_found = False
-    for one_date, date_file_list in enumerate(dates_files):
+    for one_date, date_file_list in dates_files.items():
         if date_file_list:
             found_weather[one_date] = []
             logging.debug("Loading %s weather files for date %s", len(date_file_list), one_date)
@@ -997,7 +1021,7 @@ def globus_get_all_weather(client: globus_sdk.TransferClient, endpoint_id: str, 
                     if 'environment_sensor_readings' in weather:
                         for one_reading in weather['environment_sensor_readings']:
                             weather_info = {'timestamp': one_reading['timestamp']}
-                            for one_sensor, sensor_readings in enumerate(weather['environment_sensor_readings']['weather_station']):
+                            for one_sensor, sensor_readings in one_reading['weather_station'].items():
                                 weather_info[one_sensor] = sensor_readings['value']
                             found_weather[one_date].append(weather_info)
                     else:
@@ -1013,14 +1037,18 @@ def globus_get_all_weather(client: globus_sdk.TransferClient, endpoint_id: str, 
 
 
 def get_save_weather(globus_authorizer: globus_sdk.RefreshTokenAuthorizer, remote_endpoint: str, date_experiment_ids: dict,
-                     db_conn: sqlite3.Connection) -> None:
+                     db_conn: sqlite3.Connection) -> dict:
     """Retrieves  and  saves weather  data
     Arguments:
         globus_authorizer: the Globus authorization instance
         remote_endpoint: the remote endpoint to access
         date_experiment_ids: dates with their associated experiment ID
         db_conn: the database to write to
+    Return:
+        Returns a dict of the weather ID and its associated timestamp
     """
+    weather_timestamps = {}
+
     # Prepare to fetch weather information from Globus
     trans_client = globus_sdk.TransferClient(authorizer=globus_authorizer)
 
@@ -1039,13 +1067,14 @@ def get_save_weather(globus_authorizer: globus_sdk.RefreshTokenAuthorizer, remot
     # Create the table for file information
     weather_cursor = db_conn.cursor()
     weather_cursor.execute('''CREATE TABLE weather
-                           (timestamp TEXT, temperature FLOAT, illuminance FLOAT, precipitation FLOAT, sun_direction FLOAT,
+                           (id INTEGER, timestamp TEXT, temperature FLOAT, illuminance FLOAT, precipitation FLOAT, sun_direction FLOAT,
                            wind_speed FLOAT, wind_direction FLOAT, relative_humidity FLOAT)''')
 
     # Loop through each sensor and dates and get the associated file information
     num_inserted = 0
     total_records = 0
     problems_found = 0
+    weather_id = 1
     # Load all the data to be found and check for missing dates (aka: missing data) below
     all_weather = globus_get_all_weather(trans_client, endpoint_id, list(date_experiment_ids.keys()))
     for one_date in date_experiment_ids:
@@ -1055,10 +1084,14 @@ def get_save_weather(globus_authorizer: globus_sdk.RefreshTokenAuthorizer, remot
             continue
 
         for one_weather in all_weather[one_date]:
-            weather_cursor.execute('INSERT INTO weather VALUES(?, ?, ?, ?, ?, ?, ?, ?)',
-                                   [one_weather['timestamp'], one_weather['temperature'], one_weather['brightness'],
+            weather_cursor.execute('INSERT INTO weather VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                                   [weather_id, one_weather['timestamp'], one_weather['temperature'], one_weather['brightness'],
                                     one_weather['precipitation'], one_weather['sunDirection'], one_weather['windVelocity'],
                                     one_weather['windDirection'], one_weather['relHumidity']])
+
+            weather_timestamps[weather_id] = make_timestamp_instance(one_weather['timestamp'])
+
+            weather_id += 1
             num_inserted += 1
             total_records += 1
             if num_inserted >= MAX_INSERT_BEFORE_COMMIT:
@@ -1076,6 +1109,144 @@ def get_save_weather(globus_authorizer: globus_sdk.RefreshTokenAuthorizer, remot
 
     logging.debug("Wrote %s weather records", str(total_records))
 
+    return weather_timestamps
+
+
+def get_ordered_weather_ids_timestamps(weather_timestamps: dict) -> tuple:
+    """Returns a tuple containing the ordered list of weather IDs and their associated timestamps
+    Arguments:
+        weather_timestamps: the dictionary of weather IDs and their timestamps
+    Return:
+        A tuple containing an ordered tuple of weather IDs and and ordered tuple of timestamps
+    """
+    ids = list(weather_timestamps.keys())
+    tss = list(weather_timestamps.values())
+
+    ids.sort()
+    tss.sort()
+
+    return tuple(ids), tuple(tss)
+
+
+def find_file_weather_ids(start_ts: datetime, finish_ts: datetime, ordered_weather_ids: tuple, ordered_weather_timestamps: tuple) -> tuple:
+    """Finds the minimum and maximum weather timestamps associated with the files start and finish timestamps
+    Arguments:
+        start_ts: the starting timestamp to look for
+        finish_ts: the finishing timestamp to look for
+        ordered_weather_ids: the ordered list of weather IDs
+        ordered_weather_timestamps: the ordered list of timestamps
+    Return:
+        A tuple containing the ID of the starting and ending weather timestamps that encompass the file's timestamps
+    Notes:
+        Assumes the ascending numerical order of weather IDs are directly related to the ascending temporal order of
+        the weather timestamp (in other words a larger ID value occurs later than any of the smaller ID values)
+    """
+    assert len(ordered_weather_ids) == len(ordered_weather_timestamps)
+
+    def b_search(search_timestamp: datetime, ordered_timestamps: tuple) -> tuple:
+        """Find the nearest min and max timestamp indexes for the specified search timestamp
+        Arguments:
+            search_timestamp: the timestamp to look for
+            ordered_timestamps: the ordered list of timestamps to search
+        Return:
+            A tuple containing the min and max indexes encompassing the timestamp
+        Notes:
+            If a timestamp index can't be found, None is returned in the tuple
+        """
+        min_index, max_index = None, None
+
+        first_idx = 0
+        last_idx = len(ordered_timestamps) - 1
+
+        # Simple cases first (empty tuple, one element tuple)
+        if last_idx < first_idx:
+            return min_index, max_index
+        if first_idx == last_idx:
+            if ordered_timestamps[first_idx] == search_timestamp:
+                min_index, max_index = first_idx, last_idx
+            elif ordered_timestamps[first_idx] < search_timestamp:
+                min_index = first_idx
+            else:
+                max_index = last_idx
+            return min_index, max_index
+
+        # Check the cases the loop doesn't handle
+        if ordered_timestamps[last_idx] == search_timestamp:
+            return last_idx, last_idx
+        if ordered_timestamps[last_idx] < search_timestamp:
+            return last_idx, None
+
+        # Perform search
+        while True:
+            mid_idx = int((first_idx + last_idx) / 2)
+            if ordered_timestamps[mid_idx] == search_timestamp:
+                min_index, max_index = mid_idx, mid_idx
+                break
+            if ordered_timestamps[mid_idx] < search_timestamp:
+                first_idx = mid_idx
+            else:
+                last_idx = mid_idx
+            if last_idx - first_idx <= 1:
+                if ordered_timestamps[first_idx] < search_timestamp:
+                    min_index = first_idx
+                if ordered_timestamps[last_idx] > search_timestamp:
+                    max_index = last_idx
+                break
+
+        return min_index, max_index
+
+    min_start_index, max_start_index = b_search(start_ts, ordered_weather_timestamps)
+    min_finish_index, max_finish_index = b_search(finish_ts, ordered_weather_timestamps)
+    if None in (min_start_index, max_start_index, min_finish_index, max_finish_index):
+        raise RuntimeError("Unable to find weather associated with file timestamps: %s %s" % (start_ts, finish_ts))
+    if min_start_index > min_finish_index:
+        raise RuntimeError("Something went horribly wrong finding weather associated with file timestamps: %s %s" % (start_ts, finish_ts))
+
+    return ordered_weather_ids[min_start_index], ordered_weather_ids[max_finish_index]
+
+
+def create_weather_files_table(weather_timestamps: dict, files_timestamps: dict, db_conn: sqlite3.Connection) -> None:
+    """Creates a mapping table between the weather and files
+    Arguments:
+        weather_timestamps: a dictionary of the weather IDs and their timestamp
+        files_timestamps: a dictionary of the file IDs and their starting and finishing timestamps
+        db_conn: the database to write to
+    """
+    # Create the table for file information
+    wf_cursor = db_conn.cursor()
+    wf_cursor.execute('''CREATE TABLE weather_files
+                           (id INTEGER, file_id INTEGER, min_weather_id INTEGER, max_weather_id INTEGER)''')
+
+    # Loop through each sensor and dates and get the associated file information
+    num_inserted = 0
+    total_records = 0
+    problems_found = 0
+    wf_id = 1
+
+    ordered_weather_ids, ordered_weather_timestamps = get_ordered_weather_ids_timestamps(weather_timestamps)
+    logging.info("Looking up %s files for their associated weather", str(len(files_timestamps)))
+    for file_id, file_start_finish_ts in files_timestamps.items():
+        min_weather_id, max_weather_id = find_file_weather_ids(file_start_finish_ts[0], file_start_finish_ts[1],
+                                                               ordered_weather_ids, ordered_weather_timestamps)
+        wf_cursor.execute('INSERT INTO weather_files VALUES(?, ?, ?, ?)', [wf_id, file_id, min_weather_id, max_weather_id])
+        wf_id += 1
+        num_inserted += 1
+        total_records += 1
+        if num_inserted >= MAX_INSERT_BEFORE_COMMIT:
+            db_conn.commit()
+            num_inserted = 0
+
+    db_conn.commit()
+    wf_cursor.close()
+
+    if problems_found:
+        raise RuntimeError("Unable to retrieve weather data for all dates")
+
+    if total_records <= 0:
+        logging.warning("No weather records were written")
+
+    logging.debug("Wrote %s weather files mapping records", str(total_records))
+
 
 def create_db_views(db_conn: sqlite3.Connection) -> None:
     """Adds views to the database
@@ -1088,15 +1259,29 @@ def create_db_views(db_conn: sqlite3.Connection) -> None:
     # CREATE TABLE experimental_info
     #                      (id INTEGER, plot_name TEXT, season_id INTEGER, season TEXT, cultivar_id INTEGER,
     #                      plot_bb_min_lat FLOAT, plot_bb_min_lon FLOAT, plot_bb_max_lat FLOAT, plot_bb_max_lon FLOAT)
-    # CREATE TABLE files (path TEXT, filename TEXT, format TEXT, sensor TEXT, start_time TEXT, finish_time TEXT,
+    # CREATE TABLE files (id, path TEXT, filename TEXT, format TEXT, sensor TEXT, start_time TEXT, finish_time TEXT,
     #                            gantry_x FLOAT, gantry_y FLOAT, gantry_z FLOAT, season_id INTEGER)
     # CREATE TABLE cultivars (id INTEGER, name TEXT)
-    view_cursor.execute('''CREATE VIEW files_view AS select e.id as plot_id, e.plot_name as plot_name, e.season as season,
-                        f.path as folder, f.filename as filename, f.format as format, f.sensor as sensor, f.start_time as start_time,
-                        f.finish_time as finish_time, f.gantry_x as gantry_x, f.gantry_y as gantry_y, f.gantry_z as gantry_z,
+    # CREATE TABLE weather (id, timestamp TEXT, temperature FLOAT, illuminance FLOAT, precipitation FLOAT,
+    #                            sun_direction FLOAT, wind_speed FLOAT, wind_direction FLOAT, relative_humidity FLOAT
+    view_cursor.execute('''CREATE VIEW cultivar_files AS select e.id as plot_id, e.plot_name as plot_name, e.season as season,
+                        f.id as file_id, f.path as folder, f.filename as filename, f.format as format, f.sensor as sensor,
+                        f.start_time as start_time, f.finish_time as finish_time, f.gantry_x as gantry_x, f.gantry_y as gantry_y,
+                        f.gantry_z as gantry_z,
                         c.name as cultivar_name
                         from experimental_info as e left join files as f on e.season_id = f.season_id 
                             left join cultivars as c on e.cultivar_id = c.id''')
+
+    # CREATE TABLE weather_files
+    #                            (id INTEGER, file_id INTEGER, min_weather_id INTEGER, max_weather_id INTEGER)
+    view_cursor.execute('''CREATE VIEW weather_file_map AS select w.timestamp as timestamp, w.temperature as temperature,
+                        w.illuminance as illuminance, w.precipitation as precipitation, w.sun_direction as sun_direction,
+                        w.wind_speed as wind_speed, w.wind_direction as wind_direction, w.relative_humidity as relative_humidity, 
+                        f.id as file_id, f.path as folder, f.filename as filename, f.format as format, f.sensor as sensor,
+                        f.start_time as start_time, f.finish_time as finish_time, f.gantry_x as gantry_x, f.gantry_y as gantry_y,
+                        f.gantry_z as gantry_z
+                        from weather as w left join weather_files as wf on w.id >= wf.min_weather_id and w.id <= wf.max_weather_id
+                            left join files as f on wf.file_id = f.id''')
 
     view_cursor.close()
 
@@ -1141,10 +1326,13 @@ def generate() -> None:
 
         # Create the files table
         # globus_get_save_files(authorizer, args.globus_endpoint, sensor_paths, date_experiment_ids, sql_db)
-        local_get_save_files(sensor_paths, date_experiment_ids, sql_db)
+        files_timestamps = local_get_save_files(sensor_paths, date_experiment_ids, sql_db)
 
         # Create the weather table
-        get_save_weather(authorizer, args.globus_endpoint, date_experiment_ids, sql_db)
+        weather_timestamps = get_save_weather(authorizer, args.globus_endpoint, date_experiment_ids, sql_db)
+
+        # Create supporting tables
+        create_weather_files_table(weather_timestamps, files_timestamps, sql_db)
 
         # Create the views
         create_db_views(sql_db)
