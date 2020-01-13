@@ -874,12 +874,13 @@ def globus_get_save_files(globus_authorizer: globus_sdk.RefreshTokenAuthorizer, 
     # Create the table for file information
     file_cursor = db_conn.cursor()
     file_cursor.execute('''CREATE TABLE files
-                          (path TEXT, filename TEXT, format TEXT, sensor TEXT, start_time TEXT, finish_time TEXT,
-                           gantry_x FLOAT, gantry_y FLOAT, gantry_z FLOAT, experiment_id INTEGER)''')
+                          (id INTEGER, path TEXT, filename TEXT, format TEXT, sensor TEXT, start_time TEXT, finish_time TEXT,
+                           gantry_x FLOAT, gantry_y FLOAT, gantry_z FLOAT, season_id INTEGER)''')
 
     # Loop through each sensor and dates and get the associated file information
     num_inserted = 0
     total_records = 0
+    file_id = 1
     for one_sensor_path in sensor_paths:
         sensor = one_sensor_path[0]
         paths = one_sensor_path[1]
@@ -894,10 +895,11 @@ def globus_get_save_files(globus_authorizer: globus_sdk.RefreshTokenAuthorizer, 
                 experiment_ids = date_experiment_ids[one_date]
                 for one_exp_id in experiment_ids:
                     for one_file in date_files:
-                        file_cursor.execute('INSERT INTO files VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                        file_cursor.execute('INSERT INTO files VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                                             [one_file['directory'], one_file['filename'], one_file['format'],
                                              one_file['start_time'], one_file['finish_time'], one_file['gantry_x'],
                                              one_file['gantry_y'], one_file['gantry_z'], one_exp_id])
+                        file_id += 1
                         num_inserted += 1
                         total_records += 1
                         if num_inserted >= MAX_INSERT_BEFORE_COMMIT:
@@ -1214,7 +1216,7 @@ def create_weather_files_table(weather_timestamps: dict, files_timestamps: dict,
     """
     # Create the table for file information
     wf_cursor = db_conn.cursor()
-    wf_cursor.execute('''CREATE TABLE weather_files
+    wf_cursor.execute('''CREATE TABLE weather_file_map
                            (id INTEGER, file_id INTEGER, min_weather_id INTEGER, max_weather_id INTEGER)''')
 
     # Loop through each sensor and dates and get the associated file information
@@ -1228,7 +1230,7 @@ def create_weather_files_table(weather_timestamps: dict, files_timestamps: dict,
     for file_id, file_start_finish_ts in files_timestamps.items():
         min_weather_id, max_weather_id = find_file_weather_ids(file_start_finish_ts[0], file_start_finish_ts[1],
                                                                ordered_weather_ids, ordered_weather_timestamps)
-        wf_cursor.execute('INSERT INTO weather_files VALUES(?, ?, ?, ?)', [wf_id, file_id, min_weather_id, max_weather_id])
+        wf_cursor.execute('INSERT INTO weather_file_map VALUES(?, ?, ?, ?)', [wf_id, file_id, min_weather_id, max_weather_id])
         wf_id += 1
         num_inserted += 1
         total_records += 1
@@ -1267,14 +1269,13 @@ def create_db_views(db_conn: sqlite3.Connection) -> None:
     view_cursor.execute('''CREATE VIEW cultivar_files AS select e.id as plot_id, e.plot_name as plot_name, e.season as season,
                         f.id as file_id, f.path as folder, f.filename as filename, f.format as format, f.sensor as sensor,
                         f.start_time as start_time, f.finish_time as finish_time, f.gantry_x as gantry_x, f.gantry_y as gantry_y,
-                        f.gantry_z as gantry_z,
-                        c.name as cultivar_name
+                        f.gantry_z as gantry_z, c.name as cultivar_name
                         from experimental_info as e left join files as f on e.season_id = f.season_id 
                             left join cultivars as c on e.cultivar_id = c.id''')
 
     # CREATE TABLE weather_files
     #                            (id INTEGER, file_id INTEGER, min_weather_id INTEGER, max_weather_id INTEGER)
-    view_cursor.execute('''CREATE VIEW weather_file_map AS select w.timestamp as timestamp, w.temperature as temperature,
+    view_cursor.execute('''CREATE VIEW weather_files AS select w.timestamp as timestamp, w.temperature as temperature,
                         w.illuminance as illuminance, w.precipitation as precipitation, w.sun_direction as sun_direction,
                         w.wind_speed as wind_speed, w.wind_direction as wind_direction, w.relative_humidity as relative_humidity, 
                         f.id as file_id, f.path as folder, f.filename as filename, f.format as format, f.sensor as sensor,
