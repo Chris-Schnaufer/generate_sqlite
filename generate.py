@@ -1281,7 +1281,7 @@ def create_db_views(db_conn: sqlite3.Connection) -> None:
                         f.id as file_id, f.path as folder, f.filename as filename, f.format as format, f.sensor as sensor,
                         f.start_time as start_time, f.finish_time as finish_time, f.gantry_x as gantry_x, f.gantry_y as gantry_y,
                         f.gantry_z as gantry_z
-                        from weather as w left join weather_files as wf on w.id >= wf.min_weather_id and w.id <= wf.max_weather_id
+                        from weather as w left join weather_file_map as wf on w.id >= wf.min_weather_id and w.id <= wf.max_weather_id
                             left join files as f on wf.file_id = f.id''')
 
     view_cursor.close()
