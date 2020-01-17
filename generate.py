@@ -2,15 +2,18 @@
 """Generates a SQLite database for discovering files
 """
 import argparse
+import csv
 from datetime import datetime, timedelta
 import json
 import logging
 import os
 import sqlite3
 import tempfile
+from typing import Callable
 from typing import Optional
 import webbrowser
 import shutil
+import re
 import requests
 from osgeo import ogr
 import globus_sdk
@@ -34,15 +37,54 @@ BRAPI_URL = 'https://brapi.workbench.terraref.org/brapi/v1'
 MAX_INSERT_BEFORE_COMMIT = 1000
 PLOT_INCLUSION_FILTERS = {'city': 'Maricopa'}
 
+# NOTE: SENSOR_MAPS global variable is defined after the mapping functions
+
+
+def _map_rgb_file_to_metadata(client: globus_sdk.TransferClient, endpoint_id: str, file_directory: str, file_name: str) -> Optional[str]:
+    """Performs mapping of rgb plot level file to associated JSON metadata file
+    Arguments:
+        client: the Globus transfer client to use
+        endpoint_id: the ID of the endpoint to access
+        file_directory: the directory of the file
+        file_name: the name of the file to map
+    Returns:
+        The mapped filename or None if the name can't be mapped
+    """
+    # eg: rgb_geotiff_L1_ua-mac_2018-05-08__13-10-45-826_left.tif
+    #  -> raw_data/stereoTop/2018-05-08/2018-05-08__13-10-45-826/3a45ac5f-67b5-47c6-a34d-89804269871c_metadata.json
+    # Note the source file name contains the date string "2018-05-08__13-10-45-826"
+    match = re.search('[0-9]{4}-[0-9]{2}-[0-9]{2}__[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{1,3}', file_name)
+    if match:
+        date = match[0].split('__')[0]
+        folder_path = os.path.join(GLOBUS_START_PATH, 'raw_data/stereoTop', date, match[0])
+        for one_entry in client.operation_ls(endpoint_id, path=folder_path):
+            if one_entry['name'].endswith('metadata.json'):
+                return os.path.join(folder_path, one_entry['name'])
+    return None
+
+
+SENSOR_MAPS = {
+    'RGB': {
+        'file_paths': [
+            {
+                'path': 'Level_1_Plots/rgb_geotiff',
+                'ext': ['tif']
+            }
+        ],
+        'metadata_file_mapper': _map_rgb_file_to_metadata
+    }
+}
+
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     """Adds command line arguments to the argument parser
     Arguments:
         parser: the instance to add arguments to
     """
-    parser.add_argument('sensor_paths',
-                        help='comma separated list of sensors and paths include in "<sensor>=<path>" format')
-    parser.add_argument('dates', help='command separated list of dates and ranges of dates (see below)')
+#    parser.add_argument('sensor_paths',
+#                        help='comma separated list of sensors and paths include in "<sensor>=<file ext>:<path>" format')
+    parser.add_argument('sensors', help='comma separated list of sensors to include (one or more of: ' + ','.join(SENSOR_MAPS.keys()) + ')')
+    parser.add_argument('dates', help='comma separated list of dates and ranges of dates (see below)')
     parser.add_argument('--BETYDB_URL', dest="betydb_url", help="the URL to the  BETYdb server to query")
     parser.add_argument('--BETYDB_KEY', dest="betydb_key", help="the BETYdb key to use when accessing the BETYdb server")
     parser.add_argument('--BRAPI_URL', dest="brapi_url", help="the URL to BRAPI server to use (default %s)" % BRAPI_URL)
@@ -53,54 +95,119 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
                         default=GLOBUS_ENDPOINT)
     parser.add_argument('--experiment_json', '-e', help="path to JSON file with experiment data from BETYdb")
     parser.add_argument('--cultivar_json', '-c', help="path to JSON file with cultivar data from BETYdb")
+    parser.add_argument('--gene_marker_file', help='path to the gene marker CSV file')
+    parser.add_argument('--gene_marker_file_ignore', type=int, help='the number of rows to ignore from the start of the gene marker file')
+    parser.add_argument('--cultivar_gene_map_file', help='path to the CSV file mapping cultivars to gene markers')
+    parser.add_argument('--cultivar_gene_map_file_ignore', type=int,
+                        help='the number of rows to ignore from the start of the cultivar gene map file')
 
     parser.epilog = 'All specified dates need to be in "YYYY-MM-DD" format; date ranges are two dates separated by a '\
         'colon (":") and are inclusive.'
 
 
-def prepare_sensor_paths(sensor_paths_arg: str) -> tuple:
-    """Prepares the sensor and associated path pairs for processing
+#def prepare_sensor_paths(sensor_paths_arg: str) -> tuple:
+#    """Prepares the sensor and associated path pairs for processing
+#    Arguments:
+#        sensor_paths_arg: the command line parameter value
+#    Return:
+#        Returns a tuple containing tuple pairs of sensors with their associated paths and extensions (as a list of dict):
+#        ((sensor1, [{'path': path1, 'ext': [ext1, ext2, ...]}, {'path': path2, 'ext': [ext n, ...]}, ...], (sensor2, ...), ...)
+#    Exceptions:
+#        RuntimeError is raised if a problem is found
+#    """
+#    all_sensor_paths = sensor_paths_arg.split(',')
+#    if not all_sensor_paths:
+#        raise RuntimeError("Sensor paths parameter is missing values")
+#
+#    def path_match(new: dict, cur: dict) -> bool:
+#        """Internal to this function: checks if the paths can be considered a match
+#        Arguments:
+#            new: the new path to check
+#            cur: the existing path to check against
+#        Return:
+#            True if the paths can be considered a match, False otherwise
+#        """
+#        return new['path'] == cur['path'] and (new['ext'][0] in cur['ext'] or '*' in cur['ext'])
+#
+#    def get_path_index(path: str, path_list: list) -> int:
+#        """Returns the found index of the path in the list of possibilities
+#        Arguments:
+#            path: the path to find
+#            path_list: the list of paths to search (each entry is a dict of 'path' and 'ext' list)
+#        Return:
+#            Returns the index of a match, or -1 if a match wasn't found
+#        """
+#        return next((idx for idx, values in enumerate(path_list) if values['path'] == path), -1)
+#
+#    sensors = []
+#    paths = []
+#    problems = False
+#    for one_pair in all_sensor_paths:
+#        if '=' not in one_pair:
+#            logging.warning("Sensor path pair is invalid: '%s'", one_pair)
+#            problems = True
+#            continue
+#
+#        one_sensor, one_path = (val.strip() for val in one_pair.split('='))
+#        if not one_sensor or not one_path:
+#            logging.warning("Sensor path pair is only partially formed: '%s'", one_pair)
+#            problems = True
+#            continue
+#
+#        # Get the file extension value
+#        if ':' in one_path:
+#            cur_path, cur_ext = one_path.split(':')
+#        else:
+#            cur_path = one_path
+#            cur_ext = None
+#        if not cur_ext:
+#            cur_ext = '*'
+#
+#        # Store the sensor and path information (with paths as a list off sensors)
+#        sensor_path = {'path': cur_path, 'ext': [cur_ext]}
+#        if one_sensor not in sensors:
+#            sensors.append(one_sensor)
+#            paths.append([sensor_path])
+#        else:
+#            # This sensor has more than one path associated with it
+#            sensor_index = sensors.index(one_sensor)
+#            found_path_match = [path_match(sensor_path, test_path) for test_path in paths[sensor_index]]
+#            if True not in found_path_match:
+#                path_idx = get_path_index(sensor_path['path'], paths[sensor_index])
+#                if path_idx < 0:
+#                    paths[sensor_index].append(sensor_path)
+#                else:
+#                    paths[sensor_index][path_idx]['ext'].extend(sensor_path['ext'])
+#            else:
+#                logging.debug("Duplicate path entry found: %s", str(one_pair))
+#
+#    if problems:
+#        raise RuntimeError("Errors found while processing command line sensor paths. Please correct and try again")
+#
+#    return tuple((sensors[idx], paths[idx]) for idx in range(0, len(sensors)))
+
+
+def prepare_sensors(sensors: str) -> tuple:
+    """Prepares a list of sensors from a comma separated list of sensors
     Arguments:
-        sensor_paths_arg: the command line parameter value
+        sensors: the comma separated list of sensors
     Return:
-        Returns a tuple containing tuple pairs of sensors with their associated paths (as a list):
-        ((sensor1, [path 1, path 2, ...]), (sensor2, [path n, path n+1, ...]), ...)
-    Exceptions:
-        RuntimeError is raised if a problem is found
+        A tuple of all valid sensors
+    Exception:
+        Raises RuntimeError is no valid sensors were found
     """
-    all_sensor_paths = sensor_paths_arg.split(',')
-    if not all_sensor_paths:
-        raise RuntimeError("Sensor paths parameter is missing values")
-
-    sensors = []
-    paths = []
-    problems = False
-    for one_pair in all_sensor_paths:
-        if '=' not in one_pair:
-            logging.warning("Sensor path pair is invalid: '%s'", one_pair)
-            problems = True
-            continue
-
-        one_sensor, one_path = (val.strip() for val in one_pair.split('='))
-        if not one_sensor or not one_path:
-            logging.warning("Sensor path pair is only partially formed: '%s'", one_pair)
-            problems = True
-            continue
-
-        # Store the sensor and path (with paths as a list)
-        if one_sensor not in sensors:
-            sensors.append(one_sensor)
-            paths.append([one_path])
+    sensor_list = []
+    for one_sensor in sensors.split(','):
+        cur_sensor = one_sensor.strip()
+        if cur_sensor in SENSOR_MAPS:
+            sensor_list.append(cur_sensor)
         else:
-            # This sensor has more than one path associated with it
-            path_index = sensors.index(one_sensor)
-            if one_path not in paths[path_index]:
-                paths[path_index].append(one_path)
+            logging.warning('Unknown sensor specified: %s', cur_sensor)
 
-    if problems:
-        raise RuntimeError("Errors found while processing command line sensor paths. Please correct and try again")
+    if not sensor_list:
+        raise RuntimeError("No know sensors were specified on command line")
 
-    return tuple((sensors[idx], paths[idx]) for idx in range(0, len(sensors)))
+    return tuple(sensor_list)
 
 
 def validate_date(date: str) -> bool:
@@ -610,21 +717,39 @@ def globus_get_authorizer() -> globus_sdk.RefreshTokenAuthorizer:
                                              expires_at=transfer_info['expires_at_seconds'])
 
 
-def globus_get_files_details(client: globus_sdk.TransferClient, endpoint_id: str, files_path: str) -> Optional[list]:
+def globus_get_files_info(client: globus_sdk.TransferClient, endpoint_id: str, files_path: str,
+                          extensions: list, metadata_file_mapper: Callable) -> Optional[list]:
     """Loads the files found on the path and returns their information
     Arguments:
         client: the Globus transfer client to use
         endpoint_id: the ID of the endpoint to access
         files_path: the path to load file information from
+        extensions: a list of acceptable filename extensions (can be wildcard '*')
+        metadata_file_mapper: function to map a file name to its metadata file
+    Return:
+        Returns a list of files associated with the file path
     """
     file_details = []
     json_file = None
 
+    # Load all the files in the folder that are filtered in by extension, or are metadata JSON
     for one_entry in client.operation_ls(endpoint_id, path=files_path):
         file_format = os.path.splitext(one_entry['name'])[1]
         if file_format:
             file_format = file_format.lstrip('.')
 
+        # Check for extension matching (we always keep metadata JSON files)
+        match_found = one_entry['name'].endswith('_metadata.json')
+        for one_ext in extensions:
+            if one_ext in ('*', file_format):
+                match_found = True
+                break
+
+        if not match_found:
+            logging.debug("Skipping over file due to non-matching extension: %s", one_entry['name'])
+            continue
+
+        # Prepare the file information
         file_info = {
             'directory': files_path,
             'filename': one_entry['name'],
@@ -635,69 +760,115 @@ def globus_get_files_details(client: globus_sdk.TransferClient, endpoint_id: str
         if one_entry['name'].endswith('metadata.json'):
             json_file = one_entry['name']
 
-    if not json_file:
-        if file_details:
-            raise RuntimeWarning("No metadata JSON file found in folder %s" % files_path)
+    # If we don't have anything, return nothing
+    if not file_details:
         return None
 
-    # Fetch metadata and pull information out of it
-    globus_save_path = os.path.join(LOCAL_ROOT_PATH, GLOBUS_LOCAL_START_PATH, os.path.basename(json_file))
-    if not os.path.exists(globus_save_path):
-        globus_remote_path = os.path.join(files_path, json_file)
-        transfer_setup = globus_sdk.TransferData(client, endpoint_id, GLOBUS_LOCAL_ENDPOINT_ID,
-                                                 label="Get metadata", sync_level="checksum")
-        transfer_setup.add_item(globus_remote_path, globus_save_path)
-        transfer_request = client.submit_transfer(transfer_setup)
-        task_result = client.task_wait(transfer_request['task_id'], timeout=600, polling_interval=5)
+    # Fill in each file's json file entry
+    missing_json_files = False
+    for one_file in file_details:
+        if one_file['filename'].endswith('_metadata.json'):
+            continue
 
-        if not task_result:
-            raise RuntimeError("Unable to retrieve JSON metadata: %s" % json_file)
+        if not json_file:
+            if metadata_file_mapper:
+                logging.debug("Calling metadata file mapper with: '%s' '%s'", one_file['directory'], one_file['filename'])
+                json_file = metadata_file_mapper(client, endpoint_id, one_file['directory'], one_file['filename'])
+            if not json_file:
+                missing_json_files = True
+                logging.info("Unable to find JSON file for file %s", os.path.join(one_file['directory'], one_file['filename']))
+        if json_file:
+            one_file['json_file'] = json_file
 
-    variable_metadata = {}
-    fixed_metadata = {}
-    with open(globus_save_path, 'r') as in_file:
-        metadata = json.load(in_file)
-        if 'lemnatec_measurement_metadata' in metadata:
-            lmm = metadata['lemnatec_measurement_metadata']
-            for one_key in ['gantry_system_variable_metadata', 'sensor_variable_metadata']:
-                if one_key in lmm:
-                    variable_metadata[one_key] = lmm[one_key]
-            for one_key in ['gantry_system_fixed_metadata', 'sensor_fixed_metadata']:
-                if one_key in lmm:
-                    fixed_metadata[one_key] = lmm[one_key]
-
-    pos_x, pos_y, pos_z, start_time = None, None, None, None
-    if 'gantry_system_variable_metadata' in variable_metadata:
-        gsvm = variable_metadata['gantry_system_variable_metadata']
-        if 'position x [m]' in gsvm:
-            pos_x = gsvm['position x [m]']
-        if 'position y [m]' in gsvm:
-            pos_y = gsvm['position y [m]']
-        if 'position z [m]' in gsvm:
-            pos_z = gsvm['position z [m]']
-        if 'time' in gsvm:
-            start_time = gsvm['time']
-
-    # Update the file information
-    more_details = {}
-    if variable_metadata:
-        more_details['variable_metadata'] = variable_metadata
-    if fixed_metadata:
-        more_details['fixed_metadata'] = fixed_metadata
-    if pos_x:
-        more_details['gantry_x'] = pos_x
-    if pos_y:
-        more_details['gantry_y'] = pos_y
-    if pos_z:
-        more_details['gantry_z'] = pos_z
-    if start_time:
-        more_details['start_time'] = start_time
-        more_details['finish_time'] = start_time
-
-    for idx, values in enumerate(file_details):
-        file_details[idx] = {**more_details, **values}
+    if missing_json_files:
+        raise RuntimeWarning("Missing metadata JSON files")
 
     return file_details
+
+
+def globus_get_files_details(client: globus_sdk.TransferClient, endpoint_id: str, date_files_info: dict,
+                             json_file_list: list) -> Optional[dict]:
+    """Gets the details of the files in the list
+    Arguments:
+        client: the Globus transfer client to use
+        endpoint_id: the ID of the endpoint to access
+        date_files_info: list of file information
+        json_file_list: the list of JSON files to fetch
+    Return:
+        Returns an updated list of file details
+    """
+    # Fetch metadata and pull information out of it
+    file_transfers = {}
+    for json_file in json_file_list:
+        globus_save_path = os.path.join(LOCAL_ROOT_PATH, GLOBUS_LOCAL_START_PATH, os.path.basename(json_file))
+        if not os.path.exists(globus_save_path):
+            globus_remote_path = os.path.join(json_file)
+            file_transfers[globus_remote_path] = globus_save_path
+    if file_transfers:
+        transfer_setup = globus_sdk.TransferData(client, endpoint_id, GLOBUS_LOCAL_ENDPOINT_ID, label="Get metadata", sync_level="checksum")
+        for remote_path, save_path in file_transfers.items():
+            transfer_setup.add_item(remote_path, save_path)
+        transfer_request = client.submit_transfer(transfer_setup)
+        task_result = client.task_wait(transfer_request['task_id'], timeout=600, polling_interval=5)
+        if not task_result:
+            raise RuntimeError("Unable to retrieve JSON metadata: %s" % ",".join(json_file_list))
+    del file_transfers
+
+    return_info = {}
+    for one_date, file_list in date_files_info.items():
+        return_info[one_date] = []
+        for one_file in file_list:
+            if 'json_file' not in one_file:
+                logging.debug("   No loading details for file with no json: %s", one_file['filename'])
+                return_info[one_date].append(one_file)
+                continue
+
+            variable_metadata = {}
+            fixed_metadata = {}
+            local_path = os.path.join(LOCAL_ROOT_PATH, GLOBUS_LOCAL_START_PATH, os.path.basename(one_file['json_file']))
+            logging.debug("Loading JSON file %s", local_path)
+            with open(local_path, 'r') as in_file:
+                metadata = json.load(in_file)
+                if 'lemnatec_measurement_metadata' in metadata:
+                    lmm = metadata['lemnatec_measurement_metadata']
+                    for one_key in ['gantry_system_variable_metadata', 'sensor_variable_metadata']:
+                        if one_key in lmm:
+                            variable_metadata[one_key] = lmm[one_key]
+                    for one_key in ['gantry_system_fixed_metadata', 'sensor_fixed_metadata']:
+                        if one_key in lmm:
+                            fixed_metadata[one_key] = lmm[one_key]
+
+            pos_x, pos_y, pos_z, start_time = None, None, None, None
+            if 'gantry_system_variable_metadata' in variable_metadata:
+                gsvm = variable_metadata['gantry_system_variable_metadata']
+                if 'position x [m]' in gsvm:
+                    pos_x = gsvm['position x [m]']
+                if 'position y [m]' in gsvm:
+                    pos_y = gsvm['position y [m]']
+                if 'position z [m]' in gsvm:
+                    pos_z = gsvm['position z [m]']
+                if 'time' in gsvm:
+                    start_time = gsvm['time']
+
+            # Update the file information
+            more_details = {'local_json_file': local_path}
+            if variable_metadata:
+                more_details['variable_metadata'] = variable_metadata
+            if fixed_metadata:
+                more_details['fixed_metadata'] = fixed_metadata
+            if pos_x:
+                more_details['gantry_x'] = pos_x
+            if pos_y:
+                more_details['gantry_y'] = pos_y
+            if pos_z:
+                more_details['gantry_z'] = pos_z
+            if start_time:
+                more_details['start_time'] = start_time
+                more_details['finish_time'] = start_time
+
+            return_info[one_date].append({**more_details, **one_file})
+
+    return return_info
 
 
 def local_get_files_details(files_path: str) -> Optional[list]:
@@ -780,18 +951,22 @@ def local_get_files_details(files_path: str) -> Optional[list]:
     return file_details
 
 
-def globus_get_files(client: globus_sdk.TransferClient, endpoint_id: str, sensor_path: str, date_experiment_ids: dict) -> dict:
+def globus_get_files(client: globus_sdk.TransferClient, endpoint_id: str, sensor_path: str, extensions: list, date_experiment_ids: dict,
+                     metadata_file_mapper: Callable) -> dict:
     """Returns a list of files on the endpoint path that match the dates provided
     Arguments:
         client: the Globus transfer client to use
         endpoint_id: the ID of the endpoint to access
         sensor_path: the sensor specific path
+        extensions: a list of acceptable filename extensions (can be wildcard '*')
         date_experiment_ids: dates with their associated experiment ID
+        metadata_file_mapper: function to map a file name to its metadata file
     Return:
         Returns a dictionary with dates as keys, each associated with a list of informational dict's on the files found
     """
-    pending_tasks = []
     found_files = {}
+    working_file_set = {}
+    download_file_list = []
     base_path = os.path.join('/-', GLOBUS_START_PATH, sensor_path)
     for one_date in date_experiment_ids.keys():
         cur_path = os.path.join(base_path, one_date)
@@ -801,61 +976,92 @@ def globus_get_files(client: globus_sdk.TransferClient, endpoint_id: str, sensor
             if one_entry['type'] == 'dir':
                 sub_path = os.path.join(cur_path, one_entry['name'])
                 logging.debug("Globus remote file path: %s", sub_path)
-                cur_files = globus_get_files_details(client, endpoint_id, sub_path)
+                cur_files = globus_get_files_info(client, endpoint_id, sub_path, extensions, metadata_file_mapper)
                 if cur_files:
-                    logging.debug("Found %s files for sub path: %s", str(len(cur_files)), sub_path)
-                    if one_date not in found_files:
-                        found_files[one_date] = cur_files
+                    logging.debug("Found %s files for sub path: %s with extensions %s", str(len(cur_files)), sub_path, str(extensions))
+                    if one_date not in working_file_set:
+                        working_file_set[one_date] = cur_files
                     else:
-                        found_files[one_date].extend(cur_files)
+                        working_file_set[one_date].extend(cur_files)
+
+                    for one_file in cur_files:
+                        if 'json_file' in one_file:
+                            if one_file['json_file'] not in download_file_list:
+                                download_file_list.append(os.path.join(one_file['directory'], one_file['json_file']))
                 else:
                     logging.debug("Found 0 files for sub path: %s", sub_path)
+
+            # Only download files when we have a group of them
+            if len(download_file_list) >= 10:
+                logging.info("Have 100 files to download - getting file details")
+                new_details = globus_get_files_details(client, endpoint_id, working_file_set, download_file_list)
+                for cur_date in new_details:
+                    if cur_date not in found_files:
+                        found_files[cur_date] = new_details[cur_date]
+                    else:
+                        found_files[cur_date].extend(new_details[cur_date])
+                working_file_set = {}
+                download_file_list = []
+
+    if len(download_file_list) > 0:
+        logging.info("Have %s remaining files to download - getting file details", str(len(download_file_list)))
+        new_details = globus_get_files_details(client, endpoint_id, working_file_set, download_file_list)
+        for cur_date in new_details:
+            if cur_date not in found_files:
+                found_files[cur_date] = new_details[cur_date]
+            else:
+                found_files[cur_date].extend(new_details[cur_date])
 
     return found_files
 
 
-def local_get_files(sensor_path: str, date_experiment_ids: dict) -> dict:
+def local_get_files(file_paths: list, date_experiment_ids: dict) -> dict:
     """Returns a list of files on the endpoint path that match the dates provided
     Arguments:
-        sensor_path: the sensor specific path
+        file_paths: the list of file paths and associated extensions
         date_experiment_ids: dates with their associated experiment ID
     Return:
         Returns a dictionary with dates as keys, each associated with a list of informational dict's on the files found
     """
-    found_files = {}
-    base_path = sensor_path
-    found_local_folders = 0
-    for one_date in date_experiment_ids.keys():
-        cur_path = os.path.join(base_path, one_date)
-        logging.debug("Local path: %s", cur_path)
-        path_contents = os.listdir(cur_path)
-        for one_entry in path_contents:
-            sub_path = os.path.join(cur_path, one_entry)
-            if os.path.isdir(sub_path):
-                found_local_folders += 1
-                cur_files = local_get_files_details(sub_path)
-                if cur_files:
-                    if one_date not in found_files:
-                        found_files[one_date] = cur_files
-                    else:
-                        found_files[one_date].extend(cur_files)
-                else:
-                    logging.debug("Found 0 files for sub path: %s", sub_path)
+    raise RuntimeError("local_get_files is not implemented at this time - needs updating")
+#    found_files = {}
+#    base_path = sensor_path
+#    found_local_folders = 0
+#    for one_date in date_experiment_ids.keys():
+#        cur_path = os.path.join(base_path, one_date)
+#        logging.debug("Local path: %s", cur_path)
+#        path_contents = os.listdir(cur_path)
+#        for one_entry in path_contents:
+#            sub_path = os.path.join(cur_path, one_entry)
+#            if os.path.isdir(sub_path):
+#                found_local_folders += 1
+#                cur_files = local_get_files_details(sub_path)
+#                if cur_files:
+#                    if one_date not in found_files:
+#                        found_files[one_date] = cur_files
+#                    else:
+#                        found_files[one_date].extend(cur_files)
+#                else:
+#                    logging.debug("Found 0 files for sub path: %s", sub_path)
+#
+#    logging.debug("Found %s local folders", str(found_local_folders))
+#    return found_files
 
-    logging.debug("Found %s local folders", str(found_local_folders))
-    return found_files
 
-
-def globus_get_save_files(globus_authorizer: globus_sdk.RefreshTokenAuthorizer, remote_endpoint: str, sensor_paths: tuple,
-                          date_experiment_ids: dict, db_conn: sqlite3.Connection) -> None:
+def globus_get_save_files(globus_authorizer: globus_sdk.RefreshTokenAuthorizer, remote_endpoint: str, sensors: tuple,
+                          date_experiment_ids: dict, db_conn: sqlite3.Connection) -> dict:
     """Fetches file information associated with the sensors and dates from Globus and updates the database
     Arguments:
         globus_authorizer: the Globus authorization instance
         remote_endpoint: the remote endpoint to access
-        sensor_paths: a tuple of sensors and their associated paths
+        sensors: a tuple of sensors to work on
         date_experiment_ids: dates with their associated experiment ID
         db_conn: the database to write to
+    Return:
+        Returns a dictionary of file IDs, and their associated start and finish timestamps as a tuple
     """
+    files_timestamp = {}
+
     # Prepare to fetch file information from Globus
     trans_client = globus_sdk.TransferClient(authorizer=globus_authorizer)
 
@@ -881,30 +1087,43 @@ def globus_get_save_files(globus_authorizer: globus_sdk.RefreshTokenAuthorizer, 
     num_inserted = 0
     total_records = 0
     file_id = 1
-    for one_sensor_path in sensor_paths:
-        sensor = one_sensor_path[0]
-        paths = one_sensor_path[1]
-        for one_path in paths:
-            files = globus_get_files(trans_client, endpoint_id, one_path, date_experiment_ids)
-            if not files:
-                logging.warning("Unable to find files for dates for sensor %s", sensor)
-                continue
+    try:
+        for one_sensor in sensors:
+            sensor = one_sensor
+            paths = SENSOR_MAPS[one_sensor]['file_paths']
+            for one_path in paths:
+                if SENSOR_MAPS[one_sensor]['metadata_file_mapper']:
+                    mfm = SENSOR_MAPS[one_sensor]['metadata_file_mapper']
+                else:
+                    mfm = None
+                files = globus_get_files(trans_client, endpoint_id, one_path['path'], one_path['ext'], date_experiment_ids, mfm)
+                if not files:
+                    logging.warning("Unable to find files for dates for sensor %s", sensor)
+                    continue
 
-            for one_date in files.keys():
-                date_files = files[one_date]
-                experiment_ids = date_experiment_ids[one_date]
-                for one_exp_id in experiment_ids:
-                    for one_file in date_files:
-                        file_cursor.execute('INSERT INTO files VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                                            [one_file['directory'], one_file['filename'], one_file['format'],
-                                             one_file['start_time'], one_file['finish_time'], one_file['gantry_x'],
-                                             one_file['gantry_y'], one_file['gantry_z'], one_exp_id])
-                        file_id += 1
-                        num_inserted += 1
-                        total_records += 1
-                        if num_inserted >= MAX_INSERT_BEFORE_COMMIT:
-                            db_conn.commit()
-                            num_inserted = 0
+                for one_date in files.keys():
+                    date_files = files[one_date]
+                    experiment_ids = date_experiment_ids[one_date]
+                    for one_exp_id in experiment_ids:
+                        for one_file in date_files:
+                            file_cursor.execute('INSERT INTO files VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                                                [file_id, one_file['directory'], one_file['filename'], one_file['format'],
+                                                 one_file['start_time'], one_file['finish_time'], one_file['gantry_x'],
+                                                 one_file['gantry_y'], one_file['gantry_z'], one_exp_id])
+
+                            files_timestamp[file_id] = (make_timestamp_instance(one_file['start_time']),
+                                                        make_timestamp_instance(one_file['finish_time']))
+
+                            file_id += 1
+                            num_inserted += 1
+                            total_records += 1
+                            if num_inserted >= MAX_INSERT_BEFORE_COMMIT:
+                                db_conn.commit()
+                                num_inserted = 0
+    except Exception as ex:
+        logging.error("Exception caught in globus_get_save_files")
+        logging.exception(ex)
+
     db_conn.commit()
     file_cursor.close()
 
@@ -912,11 +1131,13 @@ def globus_get_save_files(globus_authorizer: globus_sdk.RefreshTokenAuthorizer, 
         logging.warning("No file records were written")
     logging.debug("Wrote %s file records", str(total_records))
 
+    return files_timestamp
+
 
 def local_get_save_files(sensor_paths: tuple, date_experiment_ids: dict, db_conn: sqlite3.Connection) -> dict:
     """Locally fetches file information associated with the sensors and dates and updates the database
     Arguments:
-        sensor_paths: a tuple of sensors and their associated paths
+        sensor_paths: a tuple of sensors and a dict of their associated paths and filename extensions
         date_experiment_ids: dates with their associated experiment ID
         db_conn: the database to write to
     Return:
@@ -937,30 +1158,29 @@ def local_get_save_files(sensor_paths: tuple, date_experiment_ids: dict, db_conn
     for one_sensor_path in sensor_paths:
         sensor = one_sensor_path[0]
         paths = one_sensor_path[1]
-        for one_path in paths:
-            files = local_get_files(one_path, date_experiment_ids)
-            if not files:
-                logging.warning("Unable to find files for dates for sensor %s", sensor)
-                continue
+        files = local_get_files(paths, date_experiment_ids)
+        if not files:
+            logging.warning("Unable to find files for dates for sensor %s", sensor)
+            continue
 
-            for one_date in files.keys():
-                date_files = files[one_date]
-                experiment_id = date_experiment_ids[one_date]
-                for one_file in date_files:
-                    file_cursor.execute('INSERT INTO files VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                                        [file_id, one_file['directory'], one_file['filename'], one_file['format'], sensor,
-                                         one_file['start_time'], one_file['finish_time'], one_file['gantry_x'],
-                                         one_file['gantry_y'], one_file['gantry_z'], experiment_id])
+        for one_date in files.keys():
+            date_files = files[one_date]
+            experiment_id = date_experiment_ids[one_date]
+            for one_file in date_files:
+                file_cursor.execute('INSERT INTO files VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                                    [file_id, one_file['directory'], one_file['filename'], one_file['format'], sensor,
+                                     one_file['start_time'], one_file['finish_time'], one_file['gantry_x'],
+                                     one_file['gantry_y'], one_file['gantry_z'], experiment_id])
 
-                    files_timestamp[file_id] = (make_timestamp_instance(one_file['start_time']),
-                                                make_timestamp_instance(one_file['finish_time']))
+                files_timestamp[file_id] = (make_timestamp_instance(one_file['start_time']),
+                                            make_timestamp_instance(one_file['finish_time']))
 
-                    file_id += 1
-                    num_inserted += 1
-                    total_records += 1
-                    if num_inserted >= MAX_INSERT_BEFORE_COMMIT:
-                        db_conn.commit()
-                        num_inserted = 0
+                file_id += 1
+                num_inserted += 1
+                total_records += 1
+                if num_inserted >= MAX_INSERT_BEFORE_COMMIT:
+                    db_conn.commit()
+                    num_inserted = 0
     db_conn.commit()
     file_cursor.close()
 
@@ -1204,7 +1424,17 @@ def find_file_weather_ids(start_ts: datetime, finish_ts: datetime, ordered_weath
     if min_start_index > min_finish_index:
         raise RuntimeError("Something went horribly wrong finding weather associated with file timestamps: %s %s" % (start_ts, finish_ts))
 
-    return ordered_weather_ids[min_start_index], ordered_weather_ids[max_finish_index]
+    start_index = min_start_index
+    finish_index = max_finish_index
+    # Return the closest weather (comment out the next few lines to keep the bracketing weather)
+    if abs((start_ts - ordered_weather_timestamps[min_start_index]).total_seconds()) > \
+            abs((start_ts - ordered_weather_timestamps[max_start_index]).total_seconds()):
+        start_index = max_start_index
+    if abs(finish_ts - ordered_weather_timestamps[min_finish_index].total_seconds()) < \
+            abs((finish_ts - ordered_weather_timestamps[max_finish_index]).total_seconds()):
+        finish_index = min_finish_index
+
+    return ordered_weather_ids[start_index], ordered_weather_ids[finish_index]
 
 
 def create_weather_files_table(weather_timestamps: dict, files_timestamps: dict, db_conn: sqlite3.Connection) -> None:
@@ -1250,6 +1480,99 @@ def create_weather_files_table(weather_timestamps: dict, files_timestamps: dict,
     logging.debug("Wrote %s weather files mapping records", str(total_records))
 
 
+def save_gene_markers(gene_marker_file: str, file_row_ignore: int, db_conn: sqlite3.Connection) -> None:
+    """Saves the gene marker file into the database
+    Arguments:
+        gene_marker_file: path to the gene marker file to import
+        file_row_ignore: number of rows to ignore at the start of the file
+        db_conn: the database to write to
+    """
+    if not file_row_ignore:
+        skip_count = 0
+    else:
+        skip_count = int(file_row_ignore)
+
+    gene_cursor = db_conn.cursor()
+
+    created_table = False
+    column_order = None
+    insert_statement = None
+    rows_inserted = 0
+    with open(gene_marker_file, 'r') as in_file:
+        # Skip over the rows as requested
+        while skip_count > 0:
+            in_file.readline()
+            skip_count -= 1
+
+        # Process the rest of the file
+        reader = csv.DictReader(in_file)
+        for row in reader:
+            # Create the table the first time through
+            if not created_table:
+                column_order = tuple(row.keys())
+                gene_cursor.execute('CREATE TABLE gene_markers (%s)' % (' TEXT, '.join(column_order) + ' TEXT'))
+                insert_statement = 'INSERT INTO gene_markers(' + ','.join(column_order) + ') VALUES(' + \
+                                   ','.join(['?' for _ in range(0, len(column_order))]) + ')'
+                created_table = True
+
+            # Add the row
+            insert_values = []
+            for one_column in column_order:
+                insert_values.append(row[one_column])
+            gene_cursor.execute(insert_statement, insert_values)
+            rows_inserted += 1
+
+    if not created_table:
+        raise RuntimeError("Empty gene marker file specified")
+    logging.info("Inserted %s rows into gene marker table", str(rows_inserted))
+
+
+def save_cultivar_genes(cultivar_gene_file: str, file_row_ignore: int, db_conn: sqlite3.Connection) -> None:
+    """Saves the cultivar to genes file into the database
+    Arguments:
+        cultivar_gene_file: path to the cultivar gene file to import
+        file_row_ignore: number of rows to ignore at the start of the file
+        db_conn: the database to write to
+    """
+    if not file_row_ignore:
+        skip_count = 0
+    else:
+        skip_count = int(file_row_ignore)
+
+    gene_cursor = db_conn.cursor()
+
+    created_table = False
+    column_order = None
+    insert_statement = None
+    rows_inserted = 0
+    with open(cultivar_gene_file, 'r') as in_file:
+        # Skip over the rows as requested
+        while skip_count > 0:
+            in_file.readline()
+            skip_count -= 1
+
+        # Process the rest of the file
+        reader = csv.DictReader(in_file)
+        for row in reader:
+            # Create the table the first time through
+            if not created_table:
+                column_order = tuple(row.keys())
+                gene_cursor.execute('CREATE TABLE gene_markers (%s)' % (' TEXT, '.join(column_order) + ' TEXT'))
+                insert_statement = 'INSERT INTO gene_markers(' + ','.join(column_order) + ') VALUES(' + \
+                                   ','.join(['?' for _ in range(0, len(column_order))]) + ')'
+                created_table = True
+
+            # Add the row
+            insert_values = []
+            for one_column in column_order:
+                insert_values.append(row[one_column])
+            gene_cursor.execute(insert_statement, insert_values)
+            rows_inserted += 1
+
+    if not created_table:
+        raise RuntimeError("Empty gene marker file specified")
+    logging.info("Inserted %s rows into gene marker table", str(rows_inserted))
+
 def create_db_views(db_conn: sqlite3.Connection) -> None:
     """Adds views to the database
     Arguments:
@@ -1267,6 +1590,8 @@ def create_db_views(db_conn: sqlite3.Connection) -> None:
     # CREATE TABLE weather (id, timestamp TEXT, temperature FLOAT, illuminance FLOAT, precipitation FLOAT,
     #                            sun_direction FLOAT, wind_speed FLOAT, wind_direction FLOAT, relative_humidity FLOAT
     view_cursor.execute('''CREATE VIEW cultivar_files AS select e.id as plot_id, e.plot_name as plot_name, e.season as season,
+                        e.plot_bb_min_lat as plot_bb_min_lat, e.plot_bb_min_lon as plot_bb_min_lon,
+                        e.plot_bb_max_lat as plot_bb_max_lat, e.plot_bb_max_lon as plot_bb_max_lon,
                         f.id as file_id, f.path as folder, f.filename as filename, f.format as format, f.sensor as sensor,
                         f.start_time as start_time, f.finish_time as finish_time, f.gantry_x as gantry_x, f.gantry_y as gantry_y,
                         f.gantry_z as gantry_z, c.name as cultivar_name
@@ -1275,14 +1600,14 @@ def create_db_views(db_conn: sqlite3.Connection) -> None:
 
     # CREATE TABLE weather_files
     #                            (id INTEGER, file_id INTEGER, min_weather_id INTEGER, max_weather_id INTEGER)
-    view_cursor.execute('''CREATE VIEW weather_files AS select w.timestamp as timestamp, w.temperature as temperature,
+    view_cursor.execute('''CREATE VIEW weather_files AS select * from (select w.timestamp as timestamp, w.temperature as temperature,
                         w.illuminance as illuminance, w.precipitation as precipitation, w.sun_direction as sun_direction,
                         w.wind_speed as wind_speed, w.wind_direction as wind_direction, w.relative_humidity as relative_humidity, 
                         f.id as file_id, f.path as folder, f.filename as filename, f.format as format, f.sensor as sensor,
                         f.start_time as start_time, f.finish_time as finish_time, f.gantry_x as gantry_x, f.gantry_y as gantry_y,
                         f.gantry_z as gantry_z
                         from weather as w left join weather_file_map as wf on w.id >= wf.min_weather_id and w.id <= wf.max_weather_id
-                            left join files as f on wf.file_id = f.id''')
+                            left join files as f on wf.file_id = f.id) a where not a.file_id is NULL''')
 
     view_cursor.close()
 
@@ -1302,7 +1627,8 @@ def generate() -> None:
     logging.debug("Command line args: %s", str(args))
 
     # Break apart any command line arguments that may be multi-part
-    sensor_paths = prepare_sensor_paths(args.sensor_paths)
+#    sensor_paths = prepare_sensor_paths(args.sensor_paths)
+    sensors = prepare_sensors(args.sensors)
     dates = prepare_dates(args.dates)
 
     # Get other values we'll need
@@ -1326,14 +1652,19 @@ def generate() -> None:
         save_cultivars(cultivars, sql_db)
 
         # Create the files table
-        # globus_get_save_files(authorizer, args.globus_endpoint, sensor_paths, date_experiment_ids, sql_db)
-        files_timestamps = local_get_save_files(sensor_paths, date_experiment_ids, sql_db)
+        files_timestamps = globus_get_save_files(authorizer, args.globus_endpoint, sensors, date_experiment_ids, sql_db)
+        #files_timestamps = local_get_save_files(sensor_paths, date_experiment_ids, sql_db)
 
         # Create the weather table
         weather_timestamps = get_save_weather(authorizer, args.globus_endpoint, date_experiment_ids, sql_db)
 
         # Create supporting tables
         create_weather_files_table(weather_timestamps, files_timestamps, sql_db)
+
+        # Add gene marker information
+        if args.gene_marker_file and args.cultivar_gene_map_file:
+            save_gene_markers(args.gene_marker_file, args.gene_marker_file_ignore, sql_db)
+            save_cultivar_genes(args.cultivar_gene_map_file, args.cultivar_gene_map_file_ignore, sql_db)
 
         # Create the views
         create_db_views(sql_db)
