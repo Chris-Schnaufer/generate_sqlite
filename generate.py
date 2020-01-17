@@ -594,7 +594,7 @@ def get_save_experiments(dates: tuple, db_conn: sqlite3.Connection, betydb_url: 
 
     # Create the experiments table
     exp_cursor = db_conn.cursor()
-    exp_cursor.execute('''CREATE TABLE experimental_info
+    exp_cursor.execute('''CREATE TABLE experiment_info
                           (id INTEGER, plot_name TEXT, season_id INTEGER, season TEXT, cultivar_id INTEGER, 
                           plot_bb_min_lat FLOAT, plot_bb_min_lon FLOAT, plot_bb_max_lat FLOAT, plot_bb_max_lon FLOAT)''')
 
@@ -644,7 +644,7 @@ def get_save_experiments(dates: tuple, db_conn: sqlite3.Connection, betydb_url: 
             else:
                 site_name = "unknown %s" % str(cur_site['id'])
 
-            exp_cursor.execute("INSERT INTO experimental_info VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            exp_cursor.execute("INSERT INTO experiment_info VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
                                [cur_site['id'], site_name, found_exp['id'], found_exp['name'], cultivar_match['germPlasmDbId'],
                                 min_lat, min_lon, max_lat, max_lon])
 
@@ -830,7 +830,7 @@ def globus_get_files_details(client: globus_sdk.TransferClient, endpoint_id: str
             variable_metadata = {}
             fixed_metadata = {}
             local_path = os.path.join(LOCAL_ROOT_PATH, GLOBUS_LOCAL_START_PATH, os.path.basename(one_file['json_file']))
-            logging.debug("Loading JSON file %s", local_path)
+            logging.debug("Loading JSON file %s for file %s", local_path, one_file['filename'])
             with open(local_path, 'r') as in_file:
                 metadata = json.load(in_file)
                 if 'lemnatec_measurement_metadata' in metadata:
@@ -1107,23 +1107,23 @@ def globus_get_save_files(globus_authorizer: globus_sdk.RefreshTokenAuthorizer, 
 
                 for one_date in files.keys():
                     date_files = files[one_date]
-                    experiment_ids = date_experiment_ids[one_date]
-                    for one_exp_id in experiment_ids:
-                        for one_file in date_files:
-                            file_cursor.execute('INSERT INTO files VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                                                [file_id, one_file['directory'], one_file['filename'], one_file['format'],
-                                                 one_file['start_time'], one_file['finish_time'], one_file['gantry_x'],
-                                                 one_file['gantry_y'], one_file['gantry_z'], one_exp_id])
+                    experiment_id = date_experiment_ids[one_date]
+                    for one_file in date_files:
+                        file_cursor.execute('INSERT INTO files VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                                            [file_id, one_file['directory'], one_file['filename'], one_file['format'],
+                                             sensor, one_file['start_time'], one_file['finish_time'], one_file['gantry_x'],
+                                             one_file['gantry_y'], one_file['gantry_z'], experiment_id])
 
-                            files_timestamp[file_id] = (make_timestamp_instance(one_file['start_time']),
-                                                        make_timestamp_instance(one_file['finish_time']))
+                        files_timestamp[file_id] = (make_timestamp_instance(one_file['start_time']),
+                                                    make_timestamp_instance(one_file['finish_time']))
 
-                            file_id += 1
-                            num_inserted += 1
-                            total_records += 1
-                            if num_inserted >= MAX_INSERT_BEFORE_COMMIT:
-                                db_conn.commit()
-                                num_inserted = 0
+                        file_id += 1
+                        num_inserted += 1
+                        total_records += 1
+                        if num_inserted >= MAX_INSERT_BEFORE_COMMIT:
+                            db_conn.commit()
+                            num_inserted = 0
+
     except Exception as ex:
         logging.error("Exception caught in globus_get_save_files")
         logging.exception(ex)
@@ -1434,7 +1434,7 @@ def find_file_weather_ids(start_ts: datetime, finish_ts: datetime, ordered_weath
     if abs((start_ts - ordered_weather_timestamps[min_start_index]).total_seconds()) > \
             abs((start_ts - ordered_weather_timestamps[max_start_index]).total_seconds()):
         start_index = max_start_index
-    if abs(finish_ts - ordered_weather_timestamps[min_finish_index].total_seconds()) < \
+    if abs((finish_ts - ordered_weather_timestamps[min_finish_index]).total_seconds()) < \
             abs((finish_ts - ordered_weather_timestamps[max_finish_index]).total_seconds()):
         finish_index = min_finish_index
 
@@ -1548,6 +1548,9 @@ def save_gene_markers(gene_marker_file: str, key_column_index: int, file_row_ign
             rows_inserted += 1
             row_id += 1
 
+    db_conn.commit()
+    gene_cursor.close()
+
     if not created_table:
         raise RuntimeError("Empty gene marker file specified")
     logging.info("Inserted %s rows into gene marker table", str(rows_inserted))
@@ -1574,7 +1577,7 @@ def save_cultivar_genes(cultivar_gene_file: str, key_column_index: int, file_row
     else:
         skip_count = int(file_row_ignore)
 
-    gene_cursor = db_conn.cursor()
+    cg_cursor = db_conn.cursor()
 
     cultivar_column_name = None
     created_table = False
@@ -1608,7 +1611,7 @@ def save_cultivar_genes(cultivar_gene_file: str, key_column_index: int, file_row
                 create_sql = 'CREATE TABLE cultivar_genes (%s)' %\
                              ('id INTEGER, ' + column_names[0] + ' TEXT, ' + ' INTEGER, '.join(column_names[1:]) + ' INTEGER')
                 logging.debug('Create cultivar_genes SQL: %s', create_sql)
-                gene_cursor.execute(create_sql)
+                cg_cursor.execute(create_sql)
                 insert_sql = 'INSERT INTO cultivar_genes(id, ' + ','.join(column_names) + ') VALUES(' + \
                                    ','.join(['?' for _ in range(0, len(column_names) + 1)]) + ')'
                 logging.debug('Insert cultivar_genes SQL: %s', insert_sql)
@@ -1626,13 +1629,16 @@ def save_cultivar_genes(cultivar_gene_file: str, key_column_index: int, file_row
                     insert_values.append(int(row[one_column]))
                 else:
                     insert_values.append(row[one_column])
-            gene_cursor.execute(insert_sql, insert_values)
+            cg_cursor.execute(insert_sql, insert_values)
             rows_inserted += 1
             row_id += 1
 
+    db_conn.commit()
+    cg_cursor.close()
+
     if not created_table:
-        raise RuntimeError("Empty gene marker file specified")
-    logging.info("Inserted %s rows into gene marker table", str(rows_inserted))
+        raise RuntimeError("Empty cultivar genes file specified")
+    logging.info("Inserted %s rows into cultivar genes table", str(rows_inserted))
 
     return cultivar_column_name, column_names
 
@@ -1648,7 +1654,7 @@ def create_db_views(db_conn: sqlite3.Connection, cultivar_genes_cultivar_column_
     view_cursor = db_conn.cursor()
 
     # cultivar, plot, season, sensor, date/daterange
-    # CREATE TABLE experimental_info
+    # CREATE TABLE experiment_info
     #                      (id INTEGER, plot_name TEXT, season_id INTEGER, season TEXT, cultivar_id INTEGER,
     #                      plot_bb_min_lat FLOAT, plot_bb_min_lon FLOAT, plot_bb_max_lat FLOAT, plot_bb_max_lon FLOAT)
     # CREATE TABLE files (id, path TEXT, filename TEXT, format TEXT, sensor TEXT, start_time TEXT, finish_time TEXT,
@@ -1662,7 +1668,7 @@ def create_db_views(db_conn: sqlite3.Connection, cultivar_genes_cultivar_column_
                         f.id as file_id, f.path as folder, f.filename as filename, f.format as format, f.sensor as sensor,
                         f.start_time as start_time, f.finish_time as finish_time, f.gantry_x as gantry_x, f.gantry_y as gantry_y,
                         f.gantry_z as gantry_z, c.name as cultivar_name
-                        from experimental_info as e left join files as f on e.season_id = f.season_id 
+                        from experiment_info as e left join files as f on e.season_id = f.season_id 
                             left join cultivars as c on e.cultivar_id = c.id''')
 
     # CREATE TABLE weather_files
@@ -1687,10 +1693,10 @@ def create_db_views(db_conn: sqlite3.Connection, cultivar_genes_cultivar_column_
                     e.plot_bb_max_lat as plot_bb_max_lat, e.plot_bb_max_lon as plot_bb_max_lon,
                     c.name as cultivar_name,
                     %s
-                    w.timestamp as timestamp, w.temperature as temperature,
+                    w.timestamp as weather_timestamp, w.temperature as temperature,
                     w.illuminance as illuminance, w.precipitation as precipitation, w.sun_direction as sun_direction,
                     w.wind_speed as wind_speed, w.wind_direction as wind_direction, w.relative_humidity as relative_humidity
-                    from files f left join experimental_info as e on f.season_id = e.season_id
+                    from files f left join experiment_info as e on f.season_id = e.season_id
                         left join cultivars as c on e.cultivar_id = c.id
                         %s
                         left join weather_files as w on f.id = w.file_id'''
@@ -1757,12 +1763,14 @@ def generate() -> None:
         create_weather_files_table(weather_timestamps, files_timestamps, sql_db)
 
         # Add gene marker information
+        gene_markers_map = None
         cultivar_column_name = None
         cultivar_genes_column_names = None
-        if args.gene_marker_file and args.cultivar_gene_map_file:
+        if args.gene_marker_file:
             gene_markers_map = save_gene_markers(args.gene_marker_file, args.gene_marker_file_key, args.gene_marker_file_ignore, sql_db)
+        if args.cultivar_gene_map_file:
             cultivar_column_name, cultivar_genes_column_names = save_cultivar_genes(args.cultivar_gene_map_file, args.cultivar_gene_file_key,
-                                                       args.cultivar_gene_map_file_ignore, sql_db)
+                                                                                    args.cultivar_gene_map_file_ignore, sql_db)
 
         # Create the views
         create_db_views(sql_db, cultivar_column_name, cultivar_genes_column_names)
