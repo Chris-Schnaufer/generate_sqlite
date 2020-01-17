@@ -96,8 +96,12 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--experiment_json', '-e', help="path to JSON file with experiment data from BETYdb")
     parser.add_argument('--cultivar_json', '-c', help="path to JSON file with cultivar data from BETYdb")
     parser.add_argument('--gene_marker_file', help='path to the gene marker CSV file')
+    parser.add_argument('--gene_marker_file_key', type=int, default=0,
+                        help='column index in gene marker file to use as a key (columns start at 0 - defaults to 0)')
     parser.add_argument('--gene_marker_file_ignore', type=int, help='the number of rows to ignore from the start of the gene marker file')
     parser.add_argument('--cultivar_gene_map_file', help='path to the CSV file mapping cultivars to gene markers')
+    parser.add_argument('--cultivar_gene_file_key', type=int, default=0,
+                        help='column index in cultivar gene file identifying cultivars (columns start at 0 - defaults to 0)')
     parser.add_argument('--cultivar_gene_map_file_ignore', type=int,
                         help='the number of rows to ignore from the start of the cultivar gene map file')
 
@@ -1480,13 +1484,20 @@ def create_weather_files_table(weather_timestamps: dict, files_timestamps: dict,
     logging.debug("Wrote %s weather files mapping records", str(total_records))
 
 
-def save_gene_markers(gene_marker_file: str, file_row_ignore: int, db_conn: sqlite3.Connection) -> None:
+def save_gene_markers(gene_marker_file: str, key_column_index: int, file_row_ignore: int, db_conn: sqlite3.Connection) -> dict:
     """Saves the gene marker file into the database
     Arguments:
         gene_marker_file: path to the gene marker file to import
+        key_column_index: the index of the column to provide key values
         file_row_ignore: number of rows to ignore at the start of the file
         db_conn: the database to write to
+    Return:
+        Returns a dictionary of row IDs and the key value
     """
+    if not key_column_index:
+        key_index = 0
+    else:
+        key_index = int(key_column_index)
     if not file_row_ignore:
         skip_count = 0
     else:
@@ -1494,46 +1505,70 @@ def save_gene_markers(gene_marker_file: str, file_row_ignore: int, db_conn: sqli
 
     gene_cursor = db_conn.cursor()
 
+    id_key_map = {}
     created_table = False
     column_order = None
-    insert_statement = None
+    insert_sql = None
     rows_inserted = 0
     with open(gene_marker_file, 'r') as in_file:
         # Skip over the rows as requested
+        if skip_count:
+            logging.info('Skipping %s rows at start of gene marker file: %s', str(skip_count), gene_marker_file)
         while skip_count > 0:
-            in_file.readline()
+            skipped_line = in_file.readline()
+            logging.debug("Skipping line: %s", skipped_line)
             skip_count -= 1
 
         # Process the rest of the file
         reader = csv.DictReader(in_file)
+        row_id = 1
         for row in reader:
             # Create the table the first time through
             if not created_table:
                 column_order = tuple(row.keys())
-                gene_cursor.execute('CREATE TABLE gene_markers (%s)' % (' TEXT, '.join(column_order) + ' TEXT'))
-                insert_statement = 'INSERT INTO gene_markers(' + ','.join(column_order) + ') VALUES(' + \
-                                   ','.join(['?' for _ in range(0, len(column_order))]) + ')'
+                if key_index >= len(column_order):
+                    raise RuntimeError('Gene mapping key column index value (%s) is greater than the number of columns: %s',
+                                       str(key_index), str(len(column_order)))
+                column_names = tuple([column.replace(' ', '_').replace('.', '_').lower() for column in column_order])
+                logging.info('Creating gene_markers table with columns: %s', str(column_names))
+                create_sql = 'CREATE TABLE gene_markers (%s)' % ('id INTEGER, ' + ' TEXT, '.join(column_names) + ' TEXT')
+                logging.debug('Create gene_markers SQL: %s', create_sql)
+                gene_cursor.execute(create_sql)
+                insert_sql = 'INSERT INTO gene_markers(id, ' + ','.join(column_names) + ') VALUES(' + \
+                                   ','.join(['?' for _ in range(0, len(column_names) + 1)]) + ')'
+                logging.debug('Insert gene_markers SQL: %s', insert_sql)
                 created_table = True
 
             # Add the row
-            insert_values = []
+            insert_values = [row_id]
             for one_column in column_order:
                 insert_values.append(row[one_column])
-            gene_cursor.execute(insert_statement, insert_values)
+            gene_cursor.execute(insert_sql, insert_values)
+            id_key_map[row_id] = row[column_order[key_index]]
             rows_inserted += 1
+            row_id += 1
 
     if not created_table:
         raise RuntimeError("Empty gene marker file specified")
     logging.info("Inserted %s rows into gene marker table", str(rows_inserted))
 
+    return id_key_map
 
-def save_cultivar_genes(cultivar_gene_file: str, file_row_ignore: int, db_conn: sqlite3.Connection) -> None:
+
+def save_cultivar_genes(cultivar_gene_file: str, key_column_index: int, file_row_ignore: int, db_conn: sqlite3.Connection) -> tuple:
     """Saves the cultivar to genes file into the database
     Arguments:
         cultivar_gene_file: path to the cultivar gene file to import
+        key_column_index: the index of the column to provide key values
         file_row_ignore: number of rows to ignore at the start of the file
         db_conn: the database to write to
+    Return:
+        Returns the a tuple containing the column name of the cultivar field, and a list of table columns from the file
     """
+    if not key_column_index:
+        key_index = 0
+    else:
+        key_index = int(key_column_index)
     if not file_row_ignore:
         skip_count = 0
     else:
@@ -1541,42 +1576,74 @@ def save_cultivar_genes(cultivar_gene_file: str, file_row_ignore: int, db_conn: 
 
     gene_cursor = db_conn.cursor()
 
+    cultivar_column_name = None
     created_table = False
     column_order = None
-    insert_statement = None
+    column_names = None
+    insert_sql = None
     rows_inserted = 0
     with open(cultivar_gene_file, 'r') as in_file:
         # Skip over the rows as requested
+        if skip_count:
+            logging.info('Skipping %s rows at start of cultivar_gene file: %s', str(skip_count), cultivar_gene_file)
         while skip_count > 0:
-            in_file.readline()
+            skipped_line = in_file.readline()
+            logging.debug("Skipping line: %s", skipped_line)
             skip_count -= 1
 
         # Process the rest of the file
         reader = csv.DictReader(in_file)
+        row_id = 1
         for row in reader:
             # Create the table the first time through
             if not created_table:
                 column_order = tuple(row.keys())
-                gene_cursor.execute('CREATE TABLE gene_markers (%s)' % (' TEXT, '.join(column_order) + ' TEXT'))
-                insert_statement = 'INSERT INTO gene_markers(' + ','.join(column_order) + ') VALUES(' + \
-                                   ','.join(['?' for _ in range(0, len(column_order))]) + ')'
+                if key_index >= len(column_order):
+                    raise RuntimeError('Cultivar gene key column index value (%s) is greater than the number of columns: %s',
+                                       str(key_index), str(len(column_order)))
+                column_names = tuple([column.replace(' ', '_').replace('.', '_').lower() for column in column_order])
+                cultivar_column_name = column_names[key_index]
+                logging.debug("Cultivar column name for cultivar_genes table: %s", cultivar_column_name)
+                logging.info('Creating cultivar_genes table with columns: %s', str(column_names))
+                create_sql = 'CREATE TABLE cultivar_genes (%s)' %\
+                             ('id INTEGER, ' + column_names[0] + ' TEXT, ' + ' INTEGER, '.join(column_names[1:]) + ' INTEGER')
+                logging.debug('Create cultivar_genes SQL: %s', create_sql)
+                gene_cursor.execute(create_sql)
+                insert_sql = 'INSERT INTO cultivar_genes(id, ' + ','.join(column_names) + ') VALUES(' + \
+                                   ','.join(['?' for _ in range(0, len(column_names) + 1)]) + ')'
+                logging.debug('Insert cultivar_genes SQL: %s', insert_sql)
                 created_table = True
 
             # Add the row
-            insert_values = []
+            insert_values = [row_id]
             for one_column in column_order:
-                insert_values.append(row[one_column])
-            gene_cursor.execute(insert_statement, insert_values)
+                int_match = re.search('^[-+]?\\d+$', row[one_column])
+                if row[one_column] == 'No WGS':
+                    insert_values.append(-1)
+                elif row[one_column] == 'NA':
+                    insert_values.append(-2)
+                elif int_match is not None:
+                    insert_values.append(int(row[one_column]))
+                else:
+                    insert_values.append(row[one_column])
+            gene_cursor.execute(insert_sql, insert_values)
             rows_inserted += 1
+            row_id += 1
 
     if not created_table:
         raise RuntimeError("Empty gene marker file specified")
     logging.info("Inserted %s rows into gene marker table", str(rows_inserted))
 
-def create_db_views(db_conn: sqlite3.Connection) -> None:
+    return cultivar_column_name, column_names
+
+
+def create_db_views(db_conn: sqlite3.Connection, cultivar_genes_cultivar_column_name: str,
+                    cultivar_genes_all_column_names: list) -> None:
     """Adds views to the database
     Arguments:
         db_conn: the database to write to
+        cultivar_genes_cultivar_column_name: the column name in the cultivar_genes table that contains the cultivars
+        cultivar_genes_all_column_names: the list of all column names in the cultivar_genes table
     """
     view_cursor = db_conn.cursor()
 
@@ -1608,6 +1675,34 @@ def create_db_views(db_conn: sqlite3.Connection) -> None:
                         f.gantry_z as gantry_z
                         from weather as w left join weather_file_map as wf on w.id >= wf.min_weather_id and w.id <= wf.max_weather_id
                             left join files as f on wf.file_id = f.id) a where not a.file_id is NULL''')
+
+    #CREATE TABLE cultivar_genes (%s)' %\
+    #                        ('id INTEGER, ' + column_names[0] + ' TEXT, ' + ' INTEGER, '.join(column_names[1:]) + ' INTEGER')
+    # Create a format-able string for optional cultivar genetic information
+    view_template = '''CREATE VIEW unified as select f.id as file_id, f.path as folder, f.filename as filename, 
+                    f.format as format, f.sensor as sensor, f.start_time as start_time, f.finish_time as finish_time,
+                    f.gantry_x as gantry_x, f.gantry_y as gantry_y, f.gantry_z as gantry_z,
+                    e.id as plot_id, e.plot_name as plot_name, e.season as season, 
+                    e.plot_bb_min_lat as plot_bb_min_lat, e.plot_bb_min_lon as plot_bb_min_lon,
+                    e.plot_bb_max_lat as plot_bb_max_lat, e.plot_bb_max_lon as plot_bb_max_lon,
+                    c.name as cultivar_name,
+                    %s
+                    w.timestamp as timestamp, w.temperature as temperature,
+                    w.illuminance as illuminance, w.precipitation as precipitation, w.sun_direction as sun_direction,
+                    w.wind_speed as wind_speed, w.wind_direction as wind_direction, w.relative_humidity as relative_humidity
+                    from files f left join experimental_info as e on f.season_id = e.season_id
+                        left join cultivars as c on e.cultivar_id = c.id
+                        %s
+                        left join weather_files as w on f.id = w.file_id'''
+
+    if cultivar_genes_cultivar_column_name:
+        join_columns = [one_name for one_name in cultivar_genes_all_column_names if one_name not in ['id', cultivar_genes_cultivar_column_name]]
+        view_sql = view_template % (','.join(join_columns) + ', ', 'left join cultivar_genes as cg on c.name = gc.' +
+                                    cultivar_genes_cultivar_column_name)
+    else:
+        view_sql = view_template % ('', '')
+    logging.debug('Unified view SQL: %s', view_sql)
+    view_cursor.execute(view_sql)
 
     view_cursor.close()
 
@@ -1662,12 +1757,15 @@ def generate() -> None:
         create_weather_files_table(weather_timestamps, files_timestamps, sql_db)
 
         # Add gene marker information
+        cultivar_column_name = None
+        cultivar_genes_column_names = None
         if args.gene_marker_file and args.cultivar_gene_map_file:
-            save_gene_markers(args.gene_marker_file, args.gene_marker_file_ignore, sql_db)
-            save_cultivar_genes(args.cultivar_gene_map_file, args.cultivar_gene_map_file_ignore, sql_db)
+            gene_markers_map = save_gene_markers(args.gene_marker_file, args.gene_marker_file_key, args.gene_marker_file_ignore, sql_db)
+            cultivar_column_name, cultivar_genes_column_names = save_cultivar_genes(args.cultivar_gene_map_file, args.cultivar_gene_file_key,
+                                                       args.cultivar_gene_map_file_ignore, sql_db)
 
         # Create the views
-        create_db_views(sql_db)
+        create_db_views(sql_db, cultivar_column_name, cultivar_genes_column_names)
 
         shutil.move(working_filename, args.output_file)
         sql_db.close()
