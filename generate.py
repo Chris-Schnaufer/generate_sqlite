@@ -594,7 +594,7 @@ def get_save_experiments(dates: tuple, db_conn: sqlite3.Connection, betydb_url: 
 
     # Create the experiments table
     exp_cursor = db_conn.cursor()
-    exp_cursor.execute('''CREATE TABLE experiment_info
+    exp_cursor.execute('''CREATE TABLE season_info
                           (id INTEGER, plot_name TEXT, season_id INTEGER, season TEXT, cultivar_id INTEGER, 
                           plot_bb_min_lat FLOAT, plot_bb_min_lon FLOAT, plot_bb_max_lat FLOAT, plot_bb_max_lon FLOAT)''')
 
@@ -644,7 +644,7 @@ def get_save_experiments(dates: tuple, db_conn: sqlite3.Connection, betydb_url: 
             else:
                 site_name = "unknown %s" % str(cur_site['id'])
 
-            exp_cursor.execute("INSERT INTO experiment_info VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            exp_cursor.execute("INSERT INTO season_info VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
                                [cur_site['id'], site_name, found_exp['id'], found_exp['name'], cultivar_match['germPlasmDbId'],
                                 min_lat, min_lon, max_lat, max_lon])
 
@@ -653,6 +653,8 @@ def get_save_experiments(dates: tuple, db_conn: sqlite3.Connection, betydb_url: 
             if num_inserted >= MAX_INSERT_BEFORE_COMMIT:
                 db_conn.commit()
                 num_inserted = 0
+
+    # TODO: Create an index
 
     db_conn.commit()
     exp_cursor.close()
@@ -875,84 +877,84 @@ def globus_get_files_details(client: globus_sdk.TransferClient, endpoint_id: str
     return return_info
 
 
-def local_get_files_details(files_path: str) -> Optional[list]:
-    """Loads the files found on the path and returns their information
-    Arguments:
-        files_path: the path to load file information from
-    """
-    file_details = []
-    json_file = None
-
-    for one_entry in os.listdir(files_path):
-        file_format = os.path.splitext(one_entry)[1]
-        if file_format:
-            file_format = file_format.lstrip('.')
-
-        if not files_path.startswith(LOCAL_STRIP_PATH):
-            raise RuntimeError("Expected file path to start with %s not %s" % (LOCAL_STRIP_PATH, files_path))
-
-        globus_path = os.path.join(GLOBUS_START_PATH, "raw_data", files_path[len(LOCAL_STRIP_PATH):])
-        file_info = {
-            'directory': globus_path,
-            'filename': one_entry,
-            'format': file_format
-        }
-        file_details.append(file_info)
-
-        if one_entry.endswith('metadata.json'):
-            json_file = one_entry
-
-    if not json_file:
-        if file_details:
-            raise RuntimeWarning("No metadata JSON file found in folder %s" % files_path)
-        return None
-
-    # Pull information out of metadata file
-    variable_metadata = {}
-    fixed_metadata = {}
-    with open(os.path.join(files_path, json_file), 'r') as in_file:
-        metadata = json.load(in_file)
-        if 'lemnatec_measurement_metadata' in metadata:
-            lmm = metadata['lemnatec_measurement_metadata']
-            for one_key in ['gantry_system_variable_metadata', 'sensor_variable_metadata']:
-                if one_key in lmm:
-                    variable_metadata[one_key] = lmm[one_key]
-            for one_key in ['gantry_system_fixed_metadata', 'sensor_fixed_metadata']:
-                if one_key in lmm:
-                    fixed_metadata[one_key] = lmm[one_key]
-
-    pos_x, pos_y, pos_z, start_time = None, None, None, None
-    if 'gantry_system_variable_metadata' in variable_metadata:
-        gsvm = variable_metadata['gantry_system_variable_metadata']
-        if 'position x [m]' in gsvm:
-            pos_x = gsvm['position x [m]']
-        if 'position y [m]' in gsvm:
-            pos_y = gsvm['position y [m]']
-        if 'position z [m]' in gsvm:
-            pos_z = gsvm['position z [m]']
-        if 'time' in gsvm:
-            start_time = gsvm['time']
-
-    # Update the file information
-    more_details = {}
-    if variable_metadata:
-        more_details['variable_metadata'] = variable_metadata
-    if fixed_metadata:
-        more_details['fixed_metadata'] = fixed_metadata
-    if pos_x:
-        more_details['gantry_x'] = pos_x
-    if pos_y:
-        more_details['gantry_y'] = pos_y
-    if pos_z:
-        more_details['gantry_z'] = pos_z
-    if start_time:
-        more_details['start_time'] = start_time
-        more_details['finish_time'] = start_time
-
-    for idx, values in enumerate(file_details):
-        file_details[idx] = {**more_details, **values}
-
-    return file_details
+#def local_get_files_details(files_path: str) -> Optional[list]:
+#    """Loads the files found on the path and returns their information
+#    Arguments:
+#        files_path: the path to load file information from
+#    """
+#    file_details = []
+#    json_file = None
+#
+#    for one_entry in os.listdir(files_path):
+#        file_format = os.path.splitext(one_entry)[1]
+#        if file_format:
+#            file_format = file_format.lstrip('.')
+#
+#        if not files_path.startswith(LOCAL_STRIP_PATH):
+#            raise RuntimeError("Expected file path to start with %s not %s" % (LOCAL_STRIP_PATH, files_path))
+#
+#        globus_path = os.path.join(GLOBUS_START_PATH, "raw_data", files_path[len(LOCAL_STRIP_PATH):])
+#        file_info = {
+#            'directory': globus_path,
+#            'filename': one_entry,
+#            'format': file_format
+#        }
+#        file_details.append(file_info)
+#
+#        if one_entry.endswith('metadata.json'):
+#            json_file = one_entry
+#
+#    if not json_file:
+#        if file_details:
+#            raise RuntimeWarning("No metadata JSON file found in folder %s" % files_path)
+#        return None
+#
+#    # Pull information out of metadata file
+#    variable_metadata = {}
+#    fixed_metadata = {}
+#    with open(os.path.join(files_path, json_file), 'r') as in_file:
+#        metadata = json.load(in_file)
+#        if 'lemnatec_measurement_metadata' in metadata:
+#            lmm = metadata['lemnatec_measurement_metadata']
+#            for one_key in ['gantry_system_variable_metadata', 'sensor_variable_metadata']:
+#                if one_key in lmm:
+#                    variable_metadata[one_key] = lmm[one_key]
+#            for one_key in ['gantry_system_fixed_metadata', 'sensor_fixed_metadata']:
+#                if one_key in lmm:
+#                    fixed_metadata[one_key] = lmm[one_key]
+#
+#    pos_x, pos_y, pos_z, start_time = None, None, None, None
+#    if 'gantry_system_variable_metadata' in variable_metadata:
+#        gsvm = variable_metadata['gantry_system_variable_metadata']
+#        if 'position x [m]' in gsvm:
+#            pos_x = gsvm['position x [m]']
+#        if 'position y [m]' in gsvm:
+#            pos_y = gsvm['position y [m]']
+#        if 'position z [m]' in gsvm:
+#            pos_z = gsvm['position z [m]']
+#        if 'time' in gsvm:
+#            start_time = gsvm['time']
+#
+#    # Update the file information
+#    more_details = {}
+#    if variable_metadata:
+#        more_details['variable_metadata'] = variable_metadata
+#    if fixed_metadata:
+#        more_details['fixed_metadata'] = fixed_metadata
+#    if pos_x:
+#        more_details['gantry_x'] = pos_x
+#    if pos_y:
+#        more_details['gantry_y'] = pos_y
+#    if pos_z:
+#        more_details['gantry_z'] = pos_z
+#    if start_time:
+#        more_details['start_time'] = start_time
+#        more_details['finish_time'] = start_time
+#
+#    for idx, values in enumerate(file_details):
+#        file_details[idx] = {**more_details, **values}
+#
+#    return file_details
 
 
 def globus_get_files(client: globus_sdk.TransferClient, endpoint_id: str, sensor_path: str, extensions: list, date_experiment_ids: dict,
@@ -1052,14 +1054,43 @@ def local_get_files(file_paths: list, date_experiment_ids: dict) -> dict:
 #    return found_files
 
 
+def map_file_to_plot_id(file_path: str, season_id: str, seasons: list) -> str:
+    """Find the plot that is associated with the file
+    Arguments:
+        file_path: the path to the file
+        season_id: the ID of the season associated with the file
+        seasons: the list of seasons
+    Return:
+        Returns the found plot ID
+    Exceptions:
+        Raises RuntimeError if the plot ID isn't found
+    """
+    found_plot_id = None
+    file_parts = file_path.split('/')
+    for one_season in seasons:
+        if 'id' not in one_season or 'sites' not in one_season or not one_season['id'] == season_id:
+            continue
+        for one_site in one_season['sites']:
+            if 'site' not in one_site or 'sitename' not in one_site['site']:
+                continue
+            if one_site['site']['sitename'] in file_parts:
+                found_plot_id = one_site['site']['id']
+                break
+
+    if found_plot_id is None:
+        raise RuntimeError("Unable to find plot ID for file %s" % file_path)
+    return found_plot_id
+
+
 def globus_get_save_files(globus_authorizer: globus_sdk.RefreshTokenAuthorizer, remote_endpoint: str, sensors: tuple,
-                          date_experiment_ids: dict, db_conn: sqlite3.Connection) -> dict:
+                          seasons: list, date_season_ids: dict, db_conn: sqlite3.Connection) -> dict:
     """Fetches file information associated with the sensors and dates from Globus and updates the database
     Arguments:
         globus_authorizer: the Globus authorization instance
         remote_endpoint: the remote endpoint to access
         sensors: a tuple of sensors to work on
-        date_experiment_ids: dates with their associated experiment ID
+        seasons: the list of seasons
+        date_season_ids: dates with their associated season ID
         db_conn: the database to write to
     Return:
         Returns a dictionary of file IDs, and their associated start and finish timestamps as a tuple
@@ -1084,8 +1115,8 @@ def globus_get_save_files(globus_authorizer: globus_sdk.RefreshTokenAuthorizer, 
     # Create the table for file information
     file_cursor = db_conn.cursor()
     file_cursor.execute('''CREATE TABLE files
-                          (id INTEGER, path TEXT, filename TEXT, format TEXT, sensor TEXT, start_time TEXT, finish_time TEXT,
-                           gantry_x FLOAT, gantry_y FLOAT, gantry_z FLOAT, season_id INTEGER)''')
+                          (id INTEGER, folder TEXT, filename TEXT, format TEXT, sensor TEXT, start_time TEXT, finish_time TEXT,
+                           gantry_x FLOAT, gantry_y FLOAT, gantry_z FLOAT, plot_id INTEGER, season_id INTEGER)''')
 
     # Loop through each sensor and dates and get the associated file information
     num_inserted = 0
@@ -1100,19 +1131,20 @@ def globus_get_save_files(globus_authorizer: globus_sdk.RefreshTokenAuthorizer, 
                     mfm = SENSOR_MAPS[one_sensor]['metadata_file_mapper']
                 else:
                     mfm = None
-                files = globus_get_files(trans_client, endpoint_id, one_path['path'], one_path['ext'], date_experiment_ids, mfm)
+                files = globus_get_files(trans_client, endpoint_id, one_path['path'], one_path['ext'], date_season_ids, mfm)
                 if not files:
                     logging.warning("Unable to find files for dates for sensor %s", sensor)
                     continue
 
                 for one_date in files.keys():
                     date_files = files[one_date]
-                    experiment_id = date_experiment_ids[one_date]
+                    season_id = date_season_ids[one_date]
                     for one_file in date_files:
-                        file_cursor.execute('INSERT INTO files VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                        plot_id = map_file_to_plot_id(os.path.join(one_file['directory'], one_file['filename']), season_id, seasons)
+                        file_cursor.execute('INSERT INTO files VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                                             [file_id, one_file['directory'], one_file['filename'], one_file['format'],
                                              sensor, one_file['start_time'], one_file['finish_time'], one_file['gantry_x'],
-                                             one_file['gantry_y'], one_file['gantry_z'], experiment_id])
+                                             one_file['gantry_y'], one_file['gantry_z'], plot_id, season_id])
 
                         files_timestamp[file_id] = (make_timestamp_instance(one_file['start_time']),
                                                     make_timestamp_instance(one_file['finish_time']))
@@ -1138,61 +1170,61 @@ def globus_get_save_files(globus_authorizer: globus_sdk.RefreshTokenAuthorizer, 
     return files_timestamp
 
 
-def local_get_save_files(sensor_paths: tuple, date_experiment_ids: dict, db_conn: sqlite3.Connection) -> dict:
-    """Locally fetches file information associated with the sensors and dates and updates the database
-    Arguments:
-        sensor_paths: a tuple of sensors and a dict of their associated paths and filename extensions
-        date_experiment_ids: dates with their associated experiment ID
-        db_conn: the database to write to
-    Return:
-        Returns a dictionary of file IDs, and their associated start and finish timestamps as a tuple
-    """
-    files_timestamp = {}
-
-    # Create the table for file information
-    file_cursor = db_conn.cursor()
-    file_cursor.execute('''CREATE TABLE files
-                          (id INTEGER, path TEXT, filename TEXT, format TEXT, sensor TEXT, start_time TEXT, finish_time TEXT,
-                           gantry_x FLOAT, gantry_y FLOAT, gantry_z FLOAT, season_id INTEGER)''')
-
-    # Loop through each sensor and dates and get the associated file information
-    num_inserted = 0
-    total_records = 0
-    file_id = 1
-    for one_sensor_path in sensor_paths:
-        sensor = one_sensor_path[0]
-        paths = one_sensor_path[1]
-        files = local_get_files(paths, date_experiment_ids)
-        if not files:
-            logging.warning("Unable to find files for dates for sensor %s", sensor)
-            continue
-
-        for one_date in files.keys():
-            date_files = files[one_date]
-            experiment_id = date_experiment_ids[one_date]
-            for one_file in date_files:
-                file_cursor.execute('INSERT INTO files VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                                    [file_id, one_file['directory'], one_file['filename'], one_file['format'], sensor,
-                                     one_file['start_time'], one_file['finish_time'], one_file['gantry_x'],
-                                     one_file['gantry_y'], one_file['gantry_z'], experiment_id])
-
-                files_timestamp[file_id] = (make_timestamp_instance(one_file['start_time']),
-                                            make_timestamp_instance(one_file['finish_time']))
-
-                file_id += 1
-                num_inserted += 1
-                total_records += 1
-                if num_inserted >= MAX_INSERT_BEFORE_COMMIT:
-                    db_conn.commit()
-                    num_inserted = 0
-    db_conn.commit()
-    file_cursor.close()
-
-    if total_records <= 0:
-        logging.warning("No file records were written")
-    logging.debug("Wrote %s file records", str(total_records))
-
-    return files_timestamp
+#def local_get_save_files(sensor_paths: tuple, date_experiment_ids: dict, db_conn: sqlite3.Connection) -> dict:
+#    """Locally fetches file information associated with the sensors and dates and updates the database
+#    Arguments:
+#        sensor_paths: a tuple of sensors and a dict of their associated paths and filename extensions
+#        date_experiment_ids: dates with their associated experiment ID
+#        db_conn: the database to write to
+#    Return:
+#        Returns a dictionary of file IDs, and their associated start and finish timestamps as a tuple
+#    """
+#    files_timestamp = {}
+#
+#    # Create the table for file information
+#    file_cursor = db_conn.cursor()
+#    file_cursor.execute('''CREATE TABLE files
+#                          (id INTEGER, folder TEXT, filename TEXT, format TEXT, sensor TEXT, start_time TEXT, finish_time TEXT,
+#                           gantry_x FLOAT, gantry_y FLOAT, gantry_z FLOAT, season_id INTEGER)''')
+#
+#    # Loop through each sensor and dates and get the associated file information
+#    num_inserted = 0
+#    total_records = 0
+#    file_id = 1
+#    for one_sensor_path in sensor_paths:
+#        sensor = one_sensor_path[0]
+#        paths = one_sensor_path[1]
+#        files = local_get_files(paths, date_experiment_ids)
+#        if not files:
+#            logging.warning("Unable to find files for dates for sensor %s", sensor)
+#            continue
+#
+#        for one_date in files.keys():
+#            date_files = files[one_date]
+#            experiment_id = date_experiment_ids[one_date]
+#            for one_file in date_files:
+#                file_cursor.execute('INSERT INTO files VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+#                                    [file_id, one_file['directory'], one_file['filename'], one_file['format'], sensor,
+#                                     one_file['start_time'], one_file['finish_time'], one_file['gantry_x'],
+#                                     one_file['gantry_y'], one_file['gantry_z'], experiment_id])
+#
+#                files_timestamp[file_id] = (make_timestamp_instance(one_file['start_time']),
+#                                            make_timestamp_instance(one_file['finish_time']))
+#
+#                file_id += 1
+#                num_inserted += 1
+#                total_records += 1
+#                if num_inserted >= MAX_INSERT_BEFORE_COMMIT:
+#                    db_conn.commit()
+#                    num_inserted = 0
+#    db_conn.commit()
+#    file_cursor.close()
+#
+#    if total_records <= 0:
+#        logging.warning("No file records were written")
+#    logging.debug("Wrote %s file records", str(total_records))
+#
+#    return files_timestamp
 
 
 def globus_get_all_weather(client: globus_sdk.TransferClient, endpoint_id: str, dates: list) -> dict:
@@ -1654,38 +1686,46 @@ def create_db_views(db_conn: sqlite3.Connection, cultivar_genes_cultivar_column_
     view_cursor = db_conn.cursor()
 
     # cultivar, plot, season, sensor, date/daterange
-    # CREATE TABLE experiment_info
+    # CREATE TABLE season_info
     #                      (id INTEGER, plot_name TEXT, season_id INTEGER, season TEXT, cultivar_id INTEGER,
     #                      plot_bb_min_lat FLOAT, plot_bb_min_lon FLOAT, plot_bb_max_lat FLOAT, plot_bb_max_lon FLOAT)
-    # CREATE TABLE files (id, path TEXT, filename TEXT, format TEXT, sensor TEXT, start_time TEXT, finish_time TEXT,
-    #                            gantry_x FLOAT, gantry_y FLOAT, gantry_z FLOAT, season_id INTEGER)
+    # CREATE TABLE files (id, folder TEXT, filename TEXT, format TEXT, sensor TEXT, start_time TEXT, finish_time TEXT,
+    #                            gantry_x FLOAT, gantry_y FLOAT, gantry_z FLOAT, plot_id INTEGER, season_id INTEGER)
     # CREATE TABLE cultivars (id INTEGER, name TEXT)
     # CREATE TABLE weather (id, timestamp TEXT, temperature FLOAT, illuminance FLOAT, precipitation FLOAT,
     #                            sun_direction FLOAT, wind_speed FLOAT, wind_direction FLOAT, relative_humidity FLOAT
     view_cursor.execute('''CREATE VIEW cultivar_files AS select e.id as plot_id, e.plot_name as plot_name, e.season as season,
                         e.plot_bb_min_lat as plot_bb_min_lat, e.plot_bb_min_lon as plot_bb_min_lon,
                         e.plot_bb_max_lat as plot_bb_max_lat, e.plot_bb_max_lon as plot_bb_max_lon,
-                        f.id as file_id, f.path as folder, f.filename as filename, f.format as format, f.sensor as sensor,
+                        f.id as file_id, f.folder as folder, f.filename as filename, f.format as format, f.sensor as sensor,
                         f.start_time as start_time, f.finish_time as finish_time, f.gantry_x as gantry_x, f.gantry_y as gantry_y,
                         f.gantry_z as gantry_z, c.name as cultivar_name
-                        from experiment_info as e left join files as f on e.season_id = f.season_id 
+                        from season_info as e left join files as f on e.id = f.plot_id 
                             left join cultivars as c on e.cultivar_id = c.id''')
 
     # CREATE TABLE weather_files
     #                            (id INTEGER, file_id INTEGER, min_weather_id INTEGER, max_weather_id INTEGER)
+    #view_cursor.execute('''CREATE VIEW weather_files AS select * from (select w.timestamp as timestamp, w.temperature as temperature,
+    #                    w.illuminance as illuminance, w.precipitation as precipitation, w.sun_direction as sun_direction,
+    #                    w.wind_speed as wind_speed, w.wind_direction as wind_direction, w.relative_humidity as relative_humidity,
+    #                    f.id as file_id, f.folder as folder, f.filename as filename, f.format as format, f.sensor as sensor,
+    #                    f.start_time as start_time, f.finish_time as finish_time, f.gantry_x as gantry_x, f.gantry_y as gantry_y,
+    #                    f.gantry_z as gantry_z
+    #                    from weather as w left join weather_file_map as wf on w.id >= wf.min_weather_id and w.id <= wf.max_weather_id
+    #                        left join files as f on wf.file_id = f.id) a where not a.file_id is NULL''')
     view_cursor.execute('''CREATE VIEW weather_files AS select * from (select w.timestamp as timestamp, w.temperature as temperature,
                         w.illuminance as illuminance, w.precipitation as precipitation, w.sun_direction as sun_direction,
                         w.wind_speed as wind_speed, w.wind_direction as wind_direction, w.relative_humidity as relative_humidity, 
-                        f.id as file_id, f.path as folder, f.filename as filename, f.format as format, f.sensor as sensor,
+                        f.id as file_id, f.folder as folder, f.filename as filename, f.format as format, f.sensor as sensor,
                         f.start_time as start_time, f.finish_time as finish_time, f.gantry_x as gantry_x, f.gantry_y as gantry_y,
                         f.gantry_z as gantry_z
-                        from weather as w left join weather_file_map as wf on w.id >= wf.min_weather_id and w.id <= wf.max_weather_id
+                        from weather as w left join weather_file_map as wf on w.id = wf.min_weather_id
                             left join files as f on wf.file_id = f.id) a where not a.file_id is NULL''')
 
     #CREATE TABLE cultivar_genes (%s)' %\
     #                        ('id INTEGER, ' + column_names[0] + ' TEXT, ' + ' INTEGER, '.join(column_names[1:]) + ' INTEGER')
     # Create a format-able string for optional cultivar genetic information
-    view_template = '''CREATE VIEW unified as select f.id as file_id, f.path as folder, f.filename as filename, 
+    view_template = '''CREATE VIEW unified as select f.id as file_id, f.folder as folder, f.filename as filename, 
                     f.format as format, f.sensor as sensor, f.start_time as start_time, f.finish_time as finish_time,
                     f.gantry_x as gantry_x, f.gantry_y as gantry_y, f.gantry_z as gantry_z,
                     e.id as plot_id, e.plot_name as plot_name, e.season as season, 
@@ -1696,14 +1736,15 @@ def create_db_views(db_conn: sqlite3.Connection, cultivar_genes_cultivar_column_
                     w.timestamp as weather_timestamp, w.temperature as temperature,
                     w.illuminance as illuminance, w.precipitation as precipitation, w.sun_direction as sun_direction,
                     w.wind_speed as wind_speed, w.wind_direction as wind_direction, w.relative_humidity as relative_humidity
-                    from files f left join experiment_info as e on f.season_id = e.season_id
+                    from files f left join season_info as e on f.plot_id = e.id
                         left join cultivars as c on e.cultivar_id = c.id
                         %s
                         left join weather_files as w on f.id = w.file_id'''
 
     if cultivar_genes_cultivar_column_name:
-        join_columns = [one_name for one_name in cultivar_genes_all_column_names if one_name not in ['id', cultivar_genes_cultivar_column_name]]
-        view_sql = view_template % (','.join(join_columns) + ', ', 'left join cultivar_genes as cg on c.name = gc.' +
+        join_columns = ['cg.' + one_name for one_name in cultivar_genes_all_column_names
+                        if one_name not in ['id', cultivar_genes_cultivar_column_name]]
+        view_sql = view_template % (','.join(join_columns) + ', ', 'left join cultivar_genes as cg on c.name = cg.' +
                                     cultivar_genes_cultivar_column_name)
     else:
         view_sql = view_template % ('', '')
@@ -1753,7 +1794,7 @@ def generate() -> None:
         save_cultivars(cultivars, sql_db)
 
         # Create the files table
-        files_timestamps = globus_get_save_files(authorizer, args.globus_endpoint, sensors, date_experiment_ids, sql_db)
+        files_timestamps = globus_get_save_files(authorizer, args.globus_endpoint, sensors, experiments, date_experiment_ids, sql_db)
         #files_timestamps = local_get_save_files(sensor_paths, date_experiment_ids, sql_db)
 
         # Create the weather table
