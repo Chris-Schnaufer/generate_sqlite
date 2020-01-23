@@ -654,7 +654,8 @@ def get_save_experiments(dates: tuple, db_conn: sqlite3.Connection, betydb_url: 
                 db_conn.commit()
                 num_inserted = 0
 
-    # TODO: Create an index
+    # Create an index
+    exp_cursor.execute("CREATE UNIQUE INDEX 'season_info_index' on 'season_info' ('id', 'cultivar_id' asc)")
 
     db_conn.commit()
     exp_cursor.close()
@@ -691,6 +692,9 @@ def save_cultivars(cultivars: list, db_conn: sqlite3.Connection) -> None:
         if num_inserted >= MAX_INSERT_BEFORE_COMMIT:
             db_conn.commit()
             num_inserted = 0
+
+    # Create an index
+    cult_cursor.execute("CREATE UNIQUE INDEX 'cultivars_index' on 'cultivars' ('id', 'name' asc)")
 
     db_conn.commit()
     cult_cursor.close()
@@ -1160,6 +1164,9 @@ def globus_get_save_files(globus_authorizer: globus_sdk.RefreshTokenAuthorizer, 
         logging.error("Exception caught in globus_get_save_files")
         logging.exception(ex)
 
+    # Create the indexes
+    file_cursor.execute("CREATE UNIQUE INDEX 'files_index' on 'files' ('id', 'plot_id' ASC)")
+
     db_conn.commit()
     file_cursor.close()
 
@@ -1356,6 +1363,9 @@ def get_save_weather(globus_authorizer: globus_sdk.RefreshTokenAuthorizer, remot
                 db_conn.commit()
                 num_inserted = 0
 
+    # Create the index
+    weather_cursor.execute("CREATE UNIQUE INDEX 'weather_index' ON 'weather' ('id' ASC)")
+
     db_conn.commit()
     weather_cursor.close()
 
@@ -1504,6 +1514,10 @@ def create_weather_files_table(weather_timestamps: dict, files_timestamps: dict,
             db_conn.commit()
             num_inserted = 0
 
+    # Create the index
+    wf_cursor.execute("CREATE UNIQUE INDEX 'weather_file_map_index' ON 'weather_file_map' ('id' ASC)")
+    wf_cursor.execute("CREATE INDEX 'weather_file_map_lookup_index' ON 'weather_file_map' ('min_weather_id', 'max_weather_id' ASC)")
+
     db_conn.commit()
     wf_cursor.close()
 
@@ -1579,6 +1593,9 @@ def save_gene_markers(gene_marker_file: str, key_column_index: int, file_row_ign
             id_key_map[row_id] = row[column_order[key_index]]
             rows_inserted += 1
             row_id += 1
+
+    # Create the index
+    gene_cursor.execute("CREATE UNIQUE INDEX 'gene_markers_index' ON 'gene_markers' ('id' ASC)")
 
     db_conn.commit()
     gene_cursor.close()
@@ -1664,6 +1681,9 @@ def save_cultivar_genes(cultivar_gene_file: str, key_column_index: int, file_row
             cg_cursor.execute(insert_sql, insert_values)
             rows_inserted += 1
             row_id += 1
+
+    # Create the index
+    cg_cursor.execute("CREATE UNIQUE INDEX 'cultivar_genes_index' ON 'cultivar_genes' ('id','" + cultivar_column_name + "' ASC)")
 
     db_conn.commit()
     cg_cursor.close()
