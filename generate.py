@@ -6,7 +6,9 @@ import csv
 from datetime import datetime, timedelta
 import json
 import logging
+import subprocess
 import os
+import stat
 import sqlite3
 import tempfile
 from typing import Callable
@@ -23,10 +25,10 @@ GLOBUS_START_PATH = '/ua-mac'
 GLOBUS_ENVIRONMENT_LOGGER_PATH = 'raw_data/EnvironmentLogger'
 GLOBUS_ENDPOINT = 'Terraref'  # This is dependent upon the user; add a command line argument?
 GLOBUS_CLIENT_ID = '80e3a80b-0e81-43b0-84df-125ce5ad6088'  # This script's ID registered with Globus
-GLOBUS_LOCAL_ENDPOINT_ID = '3095856a-fd85-11e8-9345-0e3d676669f4'  # Find another way to get this info
+GLOBUS_LOCAL_ENDPOINT_ID = None #'845c1014-8b24-11ea-bf85-0e6cccbb0103'#'3095856a-fd85-11e8-9345-0e3d676669f4'
 GLOBUS_LOCAL_START_PATH = 'globus_data/sqlite'  # another user specific value
 
-LOCAL_ROOT_PATH = '/Users/chris/'   # Works for me but not anyone else; needs to change
+LOCAL_ROOT_PATH = os.getenv('HOME')   # Root for storing files
 LOCAL_SAVE_PATH = os.path.join(LOCAL_ROOT_PATH, GLOBUS_LOCAL_START_PATH) # Needs another approach; user specific
 LOCAL_STRIP_PATH = LOCAL_SAVE_PATH + '/'  # Needs another approach; user specific
 
@@ -81,6 +83,29 @@ def _map_rgb_file_to_metadata(client: globus_sdk.TransferClient, endpoint_id: st
     if match:
         date = match[0].split('__')[0]
         folder_path = os.path.join(GLOBUS_START_PATH, 'raw_data/stereoTop', date, match[0])
+        for one_entry in client.operation_ls(endpoint_id, path=folder_path):
+            if one_entry['name'].endswith('metadata.json'):
+                return os.path.join(folder_path, one_entry['name'])
+    return None
+
+
+def _map_ir_file_to_metadata(client: globus_sdk.TransferClient, endpoint_id: str, file_directory: str, file_name: str) -> Optional[str]:
+    """Performs mapping of IR plot level file to associated JSON metadata file
+    Arguments:
+        client: the Globus transfer client to use
+        endpoint_id: the ID of the endpoint to access
+        file_directory: the directory of the file
+        file_name: the name of the file to map
+    Returns:
+        The mapped filename or None if the name can't be mapped
+    """
+    # eg: ir_geotiff_L1_ua-mac_2018-05-19__16-33-12-692.tif
+    #  -> raw_data/flirIrCamera/2018-05-19/2018-05-19__16-33-12-692//ce65ac12-ee42-4e29-a9eb-17d812b5de7c_metadata.json
+    # Note the source file name contains the date string "2018-05-19__16-33-12-692"
+    match = re.search(TERRAREF_TIMESTAMP_REGEX, file_name)
+    if match:
+        date = match[0].split('__')[0]
+        folder_path = os.path.join(GLOBUS_START_PATH, 'raw_data/flirIrCamera', date, match[0])
         for one_entry in client.operation_ls(endpoint_id, path=folder_path):
             if one_entry['name'].endswith('metadata.json'):
                 return os.path.join(folder_path, one_entry['name'])
@@ -149,6 +174,15 @@ SENSOR_MAPS = {
         ],
         'metadata_file_mapper': _map_rgb_file_to_metadata
     },
+    'IR': {
+        'file_paths': [
+            {
+                'path': 'Level_1_Plots/ir_geotiff',
+                'ext': ['tif']
+            }
+        ],
+        'metadata_file_mapper': _map_ir_file_to_metadata
+    },
     'Lidar': {
         'file_paths': [
             {
@@ -177,6 +211,8 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--globus_endpoint',
                         help="override default remote Globus endpoint by name (default '%s')" % GLOBUS_ENDPOINT,
                         default=GLOBUS_ENDPOINT)
+    parser.add_argument('--globus_local_endpoint_id', help="the local endpoint ID to use when communicating with Globus",
+                        default=None)
     parser.add_argument('--experiment_json', '-e', help="path to JSON file with experiment data from BETYdb")
     parser.add_argument('--cultivar_json', '-c', help="path to JSON file with cultivar data from BETYdb")
     parser.add_argument('--gene_marker_file', help='path to the gene marker CSV file')
@@ -1628,6 +1664,8 @@ def generate() -> None:
     Exceptions:
         RuntimeError exceptions are raised when something goes wrong
     """
+    global GLOBUS_LOCAL_ENDPOINT_ID
+
     parser = argparse.ArgumentParser(description="Generate SQLite database for file discovery")
     add_arguments(parser)
     args = parser.parse_args()
@@ -1652,7 +1690,22 @@ def generate() -> None:
     _, working_filename = tempfile.mkstemp()
     sql_db = sqlite3.connect(working_filename)
 
+    # Make sure our storage endpoint exists
+    if not os.path.exists(LOCAL_SAVE_PATH):
+        os.makedirs(LOCAL_SAVE_PATH, exist_ok=True)
+        os.chmod(LOCAL_SAVE_PATH, stat.S_IRUSR|stat.S_IWUSR|stat.S_IXUSR|stat.S_IRGRP|stat.S_IWGRP|stat.S_IXGRP|
+                 stat.S_IROTH|stat.S_IWOTH|stat.S_IXOTH)
+
     try:
+        # Get the globus endpoint ID if it's not specified
+        if args.globus_local_endpoint_id:
+            GLOBUS_LOCAL_ENDPOINT_ID = args.globus_local_endpoint_id
+        else:
+            resp = subprocess.run(['globus', 'endpoint', 'local-id'], stdout=subprocess.PIPE)
+            if resp.returncode != 0:
+                raise RuntimeError("Unable to get Local Endpoint ID for Globus. Please use --globus_local_endpoint_id and try again")
+            GLOBUS_LOCAL_ENDPOINT_ID = resp.stdout.decode('ascii').rstrip('\n')
+
         # Get the Globus authorization
         authorizer = globus_get_authorizer()
 
