@@ -861,14 +861,41 @@ def globus_get_files_details(client: globus_sdk.TransferClient, endpoint_id: str
             globus_remote_path = json_file
             file_transfers[globus_remote_path] = globus_save_path
     if file_transfers:
-        transfer_setup = globus_sdk.TransferData(client, endpoint_id, GLOBUS_LOCAL_ENDPOINT_ID, label="Get metadata", sync_level="checksum")
-        for remote_path, save_path in file_transfers.items():
-            transfer_setup.add_item(remote_path, save_path)
-        transfer_request = client.submit_transfer(transfer_setup)
-        task_result = client.task_wait(transfer_request['task_id'], timeout=600, polling_interval=5)
-        if not task_result:
-            raise RuntimeError("Unable to retrieve JSON metadata: %s" % ",".join(json_file_list))
-    del file_transfers
+        have_exception = False
+        try:
+            transfer_setup = globus_sdk.TransferData(client, endpoint_id, GLOBUS_LOCAL_ENDPOINT_ID, label="Get metadata", sync_level="checksum")
+            for remote_path, save_path in file_transfers.items():
+                transfer_setup.add_item(remote_path, save_path)
+            transfer_request = client.submit_transfer(transfer_setup)
+            task_result = client.task_wait(transfer_request['task_id'], timeout=600, polling_interval=5)
+            if not task_result:
+                raise RuntimeError("Unable to batch-retrieve JSON metadata: %s" % ",".join(json_file_list))
+        except RuntimeError as ex:
+            have_exception = True
+            logging.warning("Failed to get files in batch mode: %s", str(ex))
+
+        # We caught an exception, try to get the files one at a time
+        if have_exception:
+            have_exception = False
+            logging.info("Attempting to pull files one at a time due to batch failure")
+            cnt = 1
+            for remote_path, save_path in file_transfers.items():
+                try:
+                    logging.info("Trying transfer %s: %s", str(cnt), str(remote_path))
+                    cnt += 1
+                    transfer_setup = globus_sdk.TransferData(client, endpoint_id, GLOBUS_LOCAL_ENDPOINT_ID,
+                                                             label="Get metadata", sync_level="checksum")
+                    transfer_setup.add_item(remote_path, save_path)
+                    transfer_request = client.submit_transfer(transfer_setup)
+                    task_result = client.task_wait(transfer_request['task_id'], timeout=600, polling_interval=5)
+                    if not task_result:
+                        raise RuntimeError("Unable to retrieve JSON metadata: %s" % remote_path)
+                except RuntimeError as ex:
+                    have_exception = True
+                    logging.warning("Failed to get single single: %s", str(ex))
+            if have_exception:
+                raise RuntimeError("Unable to retrieve all files individually")
+        del file_transfers
 
     return_info = {}
     for one_date, file_list in date_files_info.items():
