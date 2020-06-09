@@ -27,7 +27,7 @@ BRAPI_ENV_URL = 'BRAPI_URL'
 # Default BRAPI URL
 BRAPI_URL = 'https://brapi.workbench.terraref.org/brapi/v1'
 
-# How many database inserts to run before commiting them, and continuing
+# How many database inserts to run before committing them, and continuing
 MAX_INSERT_BEFORE_COMMIT = 1000
 
 # Filter for including relevant plots
