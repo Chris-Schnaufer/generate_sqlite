@@ -1,9 +1,6 @@
 # Generates a SQLite database used to discover files
 This script generates a SQLite database based upon the structure outlined at https://github.com/terraref/reference-data/issues/279
 
-**NOTE**: running this script uses the Globus SDK and requires a web interface to obtain a Native App Authorization Code.
-As part of obtaining the code from Globus, you will be asked for a label; you may want to reuse the same label every time you run this script.
-
 Please be sure to read up on the [dependencies](#dependencies) this script has.
 
 You can also skip over the command line to the [database schema](#schema) portion of this document.
@@ -12,15 +9,18 @@ You can also skip over the command line to the [database schema](#schema) portio
 Run the following command to get the full list of supported command line arguments.
 This is especially helpful in determining supported sensor/data products.
 ```python3 generate.py -h```
+Note that it may be possible to run the script without specifying "python3" on your system.
 
 Next is a sample command line.
 Please see the section below for additional information on the command line parameters.
 
-```python3 generate.py --debug --BETYDB_URL <url> --BETYDB_KEY <key> --gene_marker_file "Markers of Interest-Table 1.csv" --gene_marker_file_key 3 --cultivar_gene_map_file "PresentAbsent by Cultivar-Table 1.csv" --cultivar_gene_file_key 0  --cultivar_gene_map_file_ignore 7 RGB "2018-05-08" /home/myself/test.db```
+```python3 generate.py --debug --BETYDB_URL <betydb_url> --BETYDB_KEY <key> --BRAPI_URL <brapi_url> --gene_marker_file "Markers of Interest-Table 1.csv" --gene_marker_file_key 3 --cultivar_gene_map_file "PresentAbsent by Cultivar-Table 1.csv" --cultivar_gene_file_key 0  --cultivar_gene_map_file_ignore 7 RGB "2018-05-08" /home/myself/test.db```
 
-This command line specifies the `url` and `key` needed to access BETYdb through command line options `--BETYDB_URL` and `--BETYDB_KEY`.
+This command line specifies the `betydb_url` and `key` needed to access BETYdb through command line options `--BETYDB_URL` and `--BETYDB_KEY`.
 
-Genetic information is provided through two CSV files: gene marker information and cultivar gene information.
+The BRAPI API instance to access is specified by the `--BRAPI_URL` command line option where `<brapi_url>` is replaced with the actual URL.
+
+Optional genetic information is provided through two CSV files: gene marker information and cultivar gene information.
 
 The `RGB` portion of the command line identifies the RGB data/sensor as the files of interest.
 Additional sensors and data products are supported; these are listed when running the script with the `-h` flag.
@@ -45,7 +45,6 @@ Date ranges consist of the lower date and upper date, separated by a colon.
 * --BETYDB_KEY: the key to use when accessing the BETYdb instance
 * --BRAPI_URL: an alternative BRAPI endpoint to use 
 * --debug: enables displaying of debug messages; setting this will display quite a bit of information
-* --globus_endpoint: override the default name of the Globus Personal Connect endpoint for TERRA REF
 * --experiment_json: path to the file containing the experiment JSON previously fetched from BETYdb.
 When specified, the BETYDB_URL and BETYDB_KEY don't need to be specified (although a warning is generated).
 This file is used to satisfy all experiment data for the dates specified
@@ -60,10 +59,13 @@ There is no inherent column information expected; the table will be generated ba
 * --cultivar_gene_file_key: the numeric column index, starting at zero, containing the key values (defaults to column zero)
 * --cultivar_gene_map_file_ignore: the number of starting lines to ignore in cultivar_gene_map_file file before the header (defaults to no rows skipped)
 
-## Dependencies <a name="dependencies" />
-The main dependency of this script is to the Globus accessing the TERRA REF data.
-It's expected that Globus Connect Personal is running locally and that there's a TERRA REF endpoint defined.
+## Environment variables <a name="environ_vars" />
+For security purposes it's possible to specify the BETYdb and BRAPI connection information using environment variables.
+The environment variable names of `BETTYDB_URL`, `BETYDB_KEY`, and `BRAPI_URL` are supported.
+If one or more of these are specified, they will be used instead of the default values.
+These environment variables can be overridden by their associated command line arguments.
 
+## Dependencies <a name="dependencies" />
 Calls are made to the BETYdb `API` to extract experiment information.
 If a suitable JSON file is available locally, it can be specified on the command line and bypass the BETYdb API call.
 
